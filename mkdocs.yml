@@ -1,0 +1,57 @@
+site_name: videoflow
+site_description: Audio analysis + funscript generation engine
+site_url: https://liquid-releasing.github.io/videoflow/
+repo_url: https://github.com/liquid-releasing/videoflow
+repo_name: liquid-releasing/videoflow
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: deep purple
+      accent: cyan
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    - scheme: default
+      primary: deep purple
+      accent: cyan
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - toc.follow
+
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - tables
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - CLI reference: cli.md
+  - API reference: api.md
+
+extra:
+  generator: false
+
+copyright: "&copy; 2026 Liquid Releasing. Licensed under the MIT License."
