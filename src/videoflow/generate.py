@@ -60,6 +60,7 @@ def beats_to_curve(
     low: int = 10,
     high: int = 90,
     min_stroke: int = 20,
+    center: int | None = None,
 ) -> list[tuple[int, int]]:
     """Convert an :class:`~videoflow.audio.AudioBeatMap` into a raw motion curve.
 
@@ -68,12 +69,26 @@ def beats_to_curve(
     height is energy-scaled — loud beats produce tall strokes, quiet beats
     produce smaller ones.
 
+    Two stroke models are supported:
+
+    - **Legacy** (``center=None``, default): troughs sit at ``low``; peaks
+        rise to ``low + amplitude`` where amplitude is energy-scaled.
+        Asymmetric — the curve oscillates upward from a fixed floor.
+    - **Centered** (``center=int``): troughs and peaks sit symmetrically
+        below and above ``center``, both energy-scaled. Matches PythonDancer
+        / haptic-rest convention where the device idles at mid-stroke.
+
     Args:
         beat_map: Result of :func:`~videoflow.audio.analyze_beats`.
-        low: Trough position (0–100). Default 10.
+        low: Trough position (0–100). Default 10. In centered mode, used
+            with ``high`` to derive the maximum half-stroke ``(high-low)/2``.
         high: Maximum peak position (0–100). Default 90.
-        min_stroke: Minimum stroke amplitude above *low*, even on silent
-            beats. Keeps the device moving at all times. Default 20.
+        min_stroke: Minimum stroke amplitude even on silent beats. In legacy
+            mode this is the floor amplitude above ``low``. In centered mode
+            half of this value is the floor half-stroke either side of
+            ``center``. Default 20.
+        center: If set, use the centered stroke model with this midpoint.
+            Default ``None`` (legacy model).
 
     Returns:
         List of ``(timestamp_ms, position)`` pairs, one per beat, sorted by
@@ -81,13 +96,26 @@ def beats_to_curve(
 
     Example::
 
-        curve = beats_to_curve(beat_map)
-        # [(0, 85), (484, 10), (968, 72), (1452, 10), ...]
+        curve = beats_to_curve(beat_map)                  # legacy
+        curve = beats_to_curve(beat_map, center=50)       # centered
     """
     if not beat_map.beats:
         return []
 
     curve: list[tuple[int, int]] = []
+
+    if center is not None:
+        max_half = (high - low) / 2
+        min_half = min_stroke / 2
+        for i, (beat_ms, energy) in enumerate(zip(beat_map.beats, beat_map.energy)):
+            half = max(min_half, max_half * energy)
+            if i % 2 == 0:
+                pos = min(100, round(center + half))
+            else:
+                pos = max(0, round(center - half))
+            curve.append((beat_ms, pos))
+        return curve
+
     for i, (beat_ms, energy) in enumerate(zip(beat_map.beats, beat_map.energy)):
         if i % 2 == 0:
             # Peak — scale amplitude by energy, enforce minimum stroke
@@ -184,6 +212,7 @@ def shape_curve(
     modes: list[tuple[int, int, str]],
     *,
     low: int = 10,
+    center: int | None = None,
 ) -> list[tuple[int, int]]:
     """Apply mode-aware amplitude shaping to a raw motion curve.
 
@@ -198,13 +227,21 @@ def shape_curve(
     - **edging** — amplitude builds linearly from 50 % → 100 % over
       the phrase, creating a rising tension arc
 
-    Trough points (those at *low*) are preserved as-is. Only peaks are scaled.
+    Two compression models match the two :func:`beats_to_curve` modes:
+
+    - **Legacy** (``center=None``, default): troughs (positions ``<= low``)
+        are preserved; only peaks are scaled toward ``low``.
+    - **Centered** (``center=int``): both peaks and troughs are scaled
+        toward ``center``, preserving symmetry.
 
     Args:
         curve: Raw ``(timestamp_ms, position)`` pairs from
             :func:`beats_to_curve`.
         modes: Mode timeline from :func:`classify_modes`.
-        low: Trough position used in the original curve. Default 10.
+        low: Trough position used in the original curve (legacy model).
+            Default 10.
+        center: Curve midpoint (centered model). If set, deviations from
+            ``center`` are scaled instead of deviations from ``low``.
 
     Returns:
         Shaped ``(timestamp_ms, position)`` pairs clamped to ``[0, 100]``.
@@ -222,13 +259,7 @@ def shape_curve(
     shaped: list[tuple[int, int]] = []
 
     for t, pos in curve:
-        if pos <= low:
-            # Trough — preserve
-            shaped.append((t, pos))
-            continue
-
         sec_start, sec_end, mode = _get_section(t)
-        raw_amplitude = pos - low
 
         if mode == "edging":
             sec_dur = max(1, sec_end - sec_start)
@@ -237,6 +268,17 @@ def shape_curve(
         else:
             scale = _MODE_HIGH_SCALE.get(mode, _MODE_HIGH_SCALE["steady"])
 
+        if center is not None:
+            new_pos = round(center + (pos - center) * scale)
+            shaped.append((t, max(0, min(100, new_pos))))
+            continue
+
+        if pos <= low:
+            # Trough — preserve (legacy model)
+            shaped.append((t, pos))
+            continue
+
+        raw_amplitude = pos - low
         new_pos = low + round(raw_amplitude * scale)
         shaped.append((t, max(0, min(100, new_pos))))
 
@@ -310,6 +352,7 @@ def generate_from_beats(
     *,
     low: int = 10,
     high: int = 90,
+    center: int | None = None,
     title: str = "",
 ) -> Path:
     """Full pipeline: :class:`~videoflow.audio.AudioBeatMap` → ``.funscript``.
@@ -323,6 +366,9 @@ def generate_from_beats(
         output: Destination ``.funscript`` file path.
         low: Trough position. Default 10.
         high: Maximum peak position. Default 90.
+        center: If set, use the centered stroke model (peaks above /
+            troughs below ``center``, both energy-scaled). See
+            :func:`beats_to_curve` for details. Default ``None``.
         title: Optional title stored in the file metadata.
 
     Returns:
@@ -330,14 +376,10 @@ def generate_from_beats(
 
     Example::
 
-        from videoflow.audio import analyze_beats
-        from videoflow.generate import generate_from_beats
-
         beat_map = analyze_beats("track.mp3", source="percussive")
-        path = generate_from_beats(beat_map, "track.funscript")
-        print(f"generated: {path}")
+        path = generate_from_beats(beat_map, "track.funscript", center=50)
     """
-    curve = beats_to_curve(beat_map, low=low, high=high)
+    curve = beats_to_curve(beat_map, low=low, high=high, center=center)
     modes = classify_modes(beat_map)
-    shaped = shape_curve(curve, modes, low=low)
+    shaped = shape_curve(curve, modes, low=low, center=center)
     return export_funscript(shaped, output, title=title)
