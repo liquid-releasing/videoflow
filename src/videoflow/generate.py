@@ -31,6 +31,41 @@ class GenerateError(RuntimeError):
     """Raised when funscript generation fails."""
 
 
+# Map every accepted stroke_density form to its integer "actions per beat".
+# - "half" / 1 — one action per beat, alternates peak/trough across beats.
+#   One full stroke spans two beats. Sensual.
+# - "full" / 2 — peak at beat, trough at mid-beat. Canonical PD-style.
+# - 4 — four actions per beat (16th-note resolution at moderate BPM).
+#   Two strokes per beat. Dense.
+# - 8 — eight actions per beat (32nd-note resolution). Very dense; reserved
+#   for short climactic chapters where saturation is intentional.
+_DENSITY_ALIASES: dict = {
+    "half": 1, "1": 1, 1: 1,
+    "full": 2, "2": 2, 2: 2,
+    "4": 4, 4: 4,
+    "8": 8, 8: 8,
+}
+
+
+def _resolve_density(value) -> int:
+    """Normalise a stroke_density argument to an integer actions-per-beat.
+
+    Accepts: "half"|"full" (legacy aliases), "1"|"2"|"4"|"8", or
+    1|2|4|8 as int.
+
+    Raises:
+        ValueError: If *value* is not one of the accepted forms.
+    """
+    try:
+        return _DENSITY_ALIASES[value]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(
+            f"stroke_density must be one of "
+            f"{sorted({k for k in _DENSITY_ALIASES if isinstance(k, str)})!r} "
+            f"or 1|2|4|8, got {value!r}"
+        ) from exc
+
+
 # ---------------------------------------------------------------------------
 # Mode shaping parameters
 # ---------------------------------------------------------------------------
@@ -64,7 +99,7 @@ def beats_to_curve(
     center_trajectory: tuple[int, int] | None = None,
     tone_per_phrase: list[tuple[int, int, int, int]] | None = None,
     energy_normalize: bool = False,
-    stroke_density: str = "half",
+    stroke_density: object = "half",
 ) -> list[tuple[int, int]]:
     """Convert an :class:`~videoflow.audio.AudioBeatMap` into a raw motion curve.
 
@@ -105,6 +140,8 @@ def beats_to_curve(
     """
     if not beat_map.beats:
         return []
+
+    actions_per_beat = _resolve_density(stroke_density)
 
     # Optionally normalise energy so the 95th-percentile-loudest beat hits
     # 1.0 — guarantees the loudest beats actually reach `high` / `low`
@@ -171,49 +208,55 @@ def beats_to_curve(
         max_half = (high - low) / 2
         min_half = min_stroke / 2
 
-        if stroke_density == "full":
-            # Two actions per beat: peak at beat time, trough at midpoint to
-            # next beat. Each beat traces one complete stroke.
+        if actions_per_beat == 1:
+            # 1 action per beat: alternate peak/trough across beats.
+            # One stroke spans two beats — calmer, longer-cycle motion.
             for i, (beat_ms, energy) in enumerate(zip(beats_list, energies)):
                 half = max(min_half, max_half * energy)
-                c_peak = center_at(beat_ms)
-                trough_t = beat_ms + _next_dur(i) // 2
-                c_trough = center_at(trough_t)
-                peak = min(100, round(c_peak + half))
-                trough = max(0, round(c_trough - half))
-                curve.append((beat_ms, peak))
-                curve.append((trough_t, trough))
+                c = center_at(beat_ms)
+                if i % 2 == 0:
+                    pos = min(100, round(c + half))
+                else:
+                    pos = max(0, round(c - half))
+                curve.append((beat_ms, pos))
             return curve
 
-        # Half density (default): alternate peak/trough across beats.
-        # One stroke spans two beats — calmer, longer-cycle motion.
+        # N actions per beat (N >= 2, even): N evenly-spaced points per
+        # beat, alternating peak/trough/peak/trough… within each beat.
+        # Sub-beat slots inherit the parent beat's energy in v0.0.4;
+        # sub-beat onset weighting is queued.
         for i, (beat_ms, energy) in enumerate(zip(beats_list, energies)):
             half = max(min_half, max_half * energy)
-            c = center_at(beat_ms)
+            beat_dur = _next_dur(i)
+            for k in range(actions_per_beat):
+                t = beat_ms + (k * beat_dur) // actions_per_beat
+                c = center_at(t)
+                if k % 2 == 0:
+                    pos = min(100, round(c + half))
+                else:
+                    pos = max(0, round(c - half))
+                curve.append((t, pos))
+        return curve
+
+    # Legacy (uncentered) path — peaks rise from a fixed `low` floor.
+    if actions_per_beat == 1:
+        for i, (beat_ms, energy) in enumerate(zip(beats_list, energies)):
             if i % 2 == 0:
-                pos = min(100, round(c + half))
+                amplitude = max(min_stroke, round((high - low) * energy))
+                pos = min(100, low + amplitude)
             else:
-                pos = max(0, round(c - half))
+                pos = low
             curve.append((beat_ms, pos))
         return curve
 
-    # Legacy (uncentered) — same density choice
-    if stroke_density == "full":
-        for i, (beat_ms, energy) in enumerate(zip(beats_list, energies)):
-            amplitude = max(min_stroke, round((high - low) * energy))
-            peak = min(100, low + amplitude)
-            curve.append((beat_ms, peak))
-            curve.append((beat_ms + _next_dur(i) // 2, low))
-        return curve
-
     for i, (beat_ms, energy) in enumerate(zip(beats_list, energies)):
-        if i % 2 == 0:
-            amplitude = max(min_stroke, round((high - low) * energy))
-            pos = min(100, low + amplitude)
-        else:
-            pos = low
-        curve.append((beat_ms, pos))
-
+        amplitude = max(min_stroke, round((high - low) * energy))
+        peak = min(100, low + amplitude)
+        beat_dur = _next_dur(i)
+        for k in range(actions_per_beat):
+            t = beat_ms + (k * beat_dur) // actions_per_beat
+            pos = peak if k % 2 == 0 else low
+            curve.append((t, pos))
     return curve
 
 
@@ -531,7 +574,7 @@ def generate_from_beats(
     center_trajectory: tuple[int, int] | None = None,
     tone_per_phrase: list[tuple[int, int, int, int]] | None = None,
     energy_normalize: bool = False,
-    stroke_density: str = "half",
+    stroke_density: object = "half",
     title: str = "",
 ) -> Path:
     """Full pipeline: :class:`~videoflow.audio.AudioBeatMap` → ``.funscript``.

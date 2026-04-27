@@ -553,12 +553,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_gen.add_argument(
         "--stroke-density",
-        choices=["half", "full"],
+        choices=["half", "full", "1", "2", "4", "8"],
         default="half",
-        help="half (default): one action per beat — alternating peak/trough "
+        help="half|1 (default): one action per beat — alternating peak/trough "
              "across beats (one stroke spans two beats, sensual). "
-             "full: two actions per beat — peak + trough each beat "
-             "(canonical PD-style, intense).",
+             "full|2: two actions per beat — peak + trough each beat "
+             "(canonical PD-style). "
+             "4: four actions per beat (two strokes per beat, dense). "
+             "8: eight actions per beat (very dense; reserved for "
+             "short climactic chapters).",
     )
     p_gen.add_argument(
         "--tone",
