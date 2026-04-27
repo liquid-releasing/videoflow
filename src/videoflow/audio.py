@@ -180,6 +180,7 @@ def analyze_beats(
     source: str = "full",
     tracker: str = "auto",
     locked_bpm: float | None = None,
+    progress_callback=None,
 ) -> AudioBeatMap:
     """Analyse the beat structure of an audio or video file.
 
@@ -255,6 +256,16 @@ def analyze_beats(
             f"locked_bpm must be positive, got {locked_bpm!r}"
         )
 
+    def _progress(label: str) -> None:
+        # Thin shim so callers don't have to null-check. We swallow any
+        # exception in the callback — UI feedback should never break
+        # analysis. Each label marks the START of a new stage.
+        if progress_callback is not None:
+            try:
+                progress_callback(label)
+            except Exception:
+                pass
+
     input = Path(input)
     if not input.exists():
         raise FileNotFoundError(f"Input file not found: {input}")
@@ -268,6 +279,7 @@ def analyze_beats(
     # For video files, extract audio to a temp WAV via FFmpeg first.
     _tmp_audio = None
     if input.suffix.lower() in _VIDEO_SUFFIXES:
+        _progress("Extracting audio from video (ffmpeg)…")
         # Look for ffmpeg on PATH, then alongside this file, then alongside the input file.
         _ffmpeg = "ffmpeg"
         for _candidate in [
@@ -308,12 +320,14 @@ def analyze_beats(
         load_path = str(input)
 
     try:
+        _progress("Loading audio (librosa)…")
         y, sr_ = _librosa.load(load_path, sr=sr, mono=True)
         duration_ms = round(_librosa.get_duration(y=y, sr=sr_) * 1000)
 
         # Select the signal used for beat tracking and energy.
         # HPSS separates harmonic (voice, melody) from percussive (drums).
         if source == "percussive":
+            _progress("Separating percussive component (HPSS)…")
             _, y_track = _librosa.effects.hpss(y)
         else:
             y_track = y
@@ -326,6 +340,7 @@ def analyze_beats(
             )
 
         if resolved_tracker == "plp":
+            _progress("Detecting beats (PLP — long-form stable)…")
             # PLP — predominant local pulse. Robust on long-form material
             # where the global tempo drifts. Beats are local maxima of the
             # pulse envelope.
@@ -354,6 +369,7 @@ def analyze_beats(
             else:
                 bpm = 0.0
         else:
+            _progress("Detecting beats (beat_track)…")
             # Classic beat_track — global-tempo dynamic programming.
             bt_kwargs: dict = {"y": y_track, "sr": sr_}
             if locked_bpm is not None:
@@ -369,6 +385,7 @@ def analyze_beats(
             )
             beats_ms = [round(float(t) * 1000) for t in beat_times]
 
+        _progress("Computing phrases + per-beat energy…")
         # Downbeats: every 4th beat (assume 4/4 time, V1)
         downbeats_ms = beats_ms[::4]
 
