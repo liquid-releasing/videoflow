@@ -128,7 +128,12 @@ def cmd_analyze_beats(args: argparse.Namespace) -> int:
     from videoflow.audio import BeatError, analyze_beats
 
     try:
-        beat_map = analyze_beats(args.input, source=args.source)
+        beat_map = analyze_beats(
+            args.input,
+            source=args.source,
+            tracker=args.tracker,
+            locked_bpm=args.locked_bpm,
+        )
     except FileNotFoundError as exc:
         _err(str(exc), args.human)
         return 1
@@ -203,7 +208,12 @@ def cmd_generate_funscript(args: argparse.Namespace) -> int:
     else:
         from videoflow.audio import BeatError, analyze_beats
         try:
-            beat_map = analyze_beats(input_path, source=args.source)
+            beat_map = analyze_beats(
+                input_path,
+                source=args.source,
+                tracker=args.tracker,
+                locked_bpm=args.locked_bpm,
+            )
         except FileNotFoundError as exc:
             _err(str(exc), args.human)
             return 1
@@ -452,6 +462,29 @@ def build_parser() -> argparse.ArgumentParser:
             "before beat tracking, so beats follow the drums."
         ),
     )
+    p_beats.add_argument(
+        "--tracker",
+        choices=["auto", "beat_track", "plp"],
+        default="auto",
+        help=(
+            "auto (default): plp for tracks > 10 min, beat_track otherwise. "
+            "beat_track: classic global-tempo DP tracker (best for short, "
+            "steady-tempo tracks). "
+            "plp: predominant local pulse — robust on long-form material "
+            "where tempo drifts."
+        ),
+    )
+    p_beats.add_argument(
+        "--locked-bpm",
+        type=float,
+        default=None,
+        metavar="BPM",
+        dest="locked_bpm",
+        help=(
+            "Pin reported BPM and bias the tracker toward this tempo. "
+            "Useful when auto-detection lands on a half/double octave."
+        ),
+    )
     p_beats.set_defaults(func=cmd_analyze_beats)
 
     # generate-funscript
@@ -476,6 +509,25 @@ def build_parser() -> argparse.ArgumentParser:
             "best for music with vocals. "
             "full: use the raw mix."
         ),
+    )
+    p_gen.add_argument(
+        "--tracker",
+        choices=["auto", "beat_track", "plp"],
+        default="auto",
+        help=(
+            "auto (default): plp for tracks > 10 min, beat_track otherwise. "
+            "beat_track: classic global-tempo DP tracker. "
+            "plp: predominant local pulse — robust on long-form material "
+            "where tempo drifts."
+        ),
+    )
+    p_gen.add_argument(
+        "--locked-bpm",
+        type=float,
+        default=None,
+        metavar="BPM",
+        dest="locked_bpm",
+        help="Pin BPM and bias the tracker toward this tempo.",
     )
     p_gen.add_argument(
         "--low", type=int, default=10, metavar="POS",
