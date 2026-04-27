@@ -128,7 +128,12 @@ def cmd_analyze_beats(args: argparse.Namespace) -> int:
     from videoflow.audio import BeatError, analyze_beats
 
     try:
-        beat_map = analyze_beats(args.input, source=args.source)
+        beat_map = analyze_beats(
+            args.input,
+            source=args.source,
+            tracker=args.tracker,
+            locked_bpm=args.locked_bpm,
+        )
     except FileNotFoundError as exc:
         _err(str(exc), args.human)
         return 1
@@ -203,7 +208,12 @@ def cmd_generate_funscript(args: argparse.Namespace) -> int:
     else:
         from videoflow.audio import BeatError, analyze_beats
         try:
-            beat_map = analyze_beats(input_path, source=args.source)
+            beat_map = analyze_beats(
+                input_path,
+                source=args.source,
+                tracker=args.tracker,
+                locked_bpm=args.locked_bpm,
+            )
         except FileNotFoundError as exc:
             _err(str(exc), args.human)
             return 1
@@ -211,12 +221,30 @@ def cmd_generate_funscript(args: argparse.Namespace) -> int:
             _err(str(exc), args.human)
             return 1
 
+    traj = None
+    auto_tone = None
+    if args.tone == "rise":
+        traj = (30, 70)
+    elif args.tone == "fall":
+        traj = (70, 30)
+    elif args.tone == "auto":
+        from videoflow.generate import compute_auto_tone
+        auto_tone = compute_auto_tone(beat_map)
+    elif args.center_trajectory:
+        a, b = args.center_trajectory.split(",")
+        traj = (int(a), int(b))
+
     try:
         output = generate_from_beats(
             beat_map,
             args.output,
             low=args.low,
             high=args.high,
+            center=args.center,
+            center_trajectory=traj,
+            tone_per_phrase=auto_tone,
+            energy_normalize=args.energy_normalize,
+            stroke_density=args.stroke_density,
             title=args.title or "",
         )
     except GenerateError as exc:
@@ -434,6 +462,29 @@ def build_parser() -> argparse.ArgumentParser:
             "before beat tracking, so beats follow the drums."
         ),
     )
+    p_beats.add_argument(
+        "--tracker",
+        choices=["auto", "beat_track", "plp"],
+        default="auto",
+        help=(
+            "auto (default): plp for tracks > 10 min, beat_track otherwise. "
+            "beat_track: classic global-tempo DP tracker (best for short, "
+            "steady-tempo tracks). "
+            "plp: predominant local pulse — robust on long-form material "
+            "where tempo drifts."
+        ),
+    )
+    p_beats.add_argument(
+        "--locked-bpm",
+        type=float,
+        default=None,
+        metavar="BPM",
+        dest="locked_bpm",
+        help=(
+            "Pin reported BPM and bias the tracker toward this tempo. "
+            "Useful when auto-detection lands on a half/double octave."
+        ),
+    )
     p_beats.set_defaults(func=cmd_analyze_beats)
 
     # generate-funscript
@@ -460,12 +511,72 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_gen.add_argument(
+        "--tracker",
+        choices=["auto", "beat_track", "plp"],
+        default="auto",
+        help=(
+            "auto (default): plp for tracks > 10 min, beat_track otherwise. "
+            "beat_track: classic global-tempo DP tracker. "
+            "plp: predominant local pulse — robust on long-form material "
+            "where tempo drifts."
+        ),
+    )
+    p_gen.add_argument(
+        "--locked-bpm",
+        type=float,
+        default=None,
+        metavar="BPM",
+        dest="locked_bpm",
+        help="Pin BPM and bias the tracker toward this tempo.",
+    )
+    p_gen.add_argument(
         "--low", type=int, default=10, metavar="POS",
-        help="Trough position 0–100 (default 10).",
+        help="Trough floor 0–100 (default 10). In centered mode, sets the "
+             "lower bound of the stroke at full energy.",
     )
     p_gen.add_argument(
         "--high", type=int, default=90, metavar="POS",
-        help="Maximum peak position 0–100 (default 90).",
+        help="Peak ceiling 0–100 (default 90). In centered mode, sets the "
+             "upper bound of the stroke at full energy.",
+    )
+    p_gen.add_argument(
+        "--center", type=int, default=None, metavar="POS",
+        help="Curve midpoint 0–100. When set, the curve oscillates "
+             "symmetrically around this value (PD-style). When omitted, "
+             "uses the legacy trough-at-low model.",
+    )
+    p_gen.add_argument(
+        "--energy-normalize", action="store_true",
+        help="Normalise energies to the 95th-percentile beat = 1.0. Ensures "
+             "loud beats reach the configured high/low instead of compressing "
+             "into the middle.",
+    )
+    p_gen.add_argument(
+        "--stroke-density",
+        choices=["half", "full", "1", "2", "4", "8"],
+        default="half",
+        help="half|1 (default): one action per beat — alternating peak/trough "
+             "across beats (one stroke spans two beats, sensual). "
+             "full|2: two actions per beat — peak + trough each beat "
+             "(canonical PD-style). "
+             "4: four actions per beat (two strokes per beat, dense). "
+             "8: eight actions per beat (very dense; reserved for "
+             "short climactic chapters).",
+    )
+    p_gen.add_argument(
+        "--tone",
+        choices=["flat", "rise", "fall", "auto"],
+        default="flat",
+        help="Whole-shape gestalt for the curve. flat (default): constant "
+             "center 50. rise: center drifts 30→70 over the track. fall: "
+             "70→30. auto: per-phrase center swing derived from each "
+             "phrase's energy slope — rising phrases climb, falling ones "
+             "relax. Works on drones too (energy moves even without melody).",
+    )
+    p_gen.add_argument(
+        "--center-trajectory", default=None, metavar="START,END",
+        help="Custom center trajectory as 'start,end' (each 0–100). E.g. "
+             "'40,80' rises from 40 to 80. Overrides --tone if both given.",
     )
     p_gen.add_argument(
         "--title", default="", metavar="TEXT",

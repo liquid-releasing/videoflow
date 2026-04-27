@@ -379,5 +379,114 @@ class TestGenerateFromBeats(unittest.TestCase):
         self.assertEqual(modes[0][2], "break")
 
 
+# ---------------------------------------------------------------------------
+# Sub-beat density (1 / 2 / 4 / 8 actions per beat)
+# ---------------------------------------------------------------------------
+
+class TestStrokeDensity(unittest.TestCase):
+
+    def test_resolve_density_legacy_aliases(self):
+        from videoflow.generate import _resolve_density
+        self.assertEqual(_resolve_density("half"), 1)
+        self.assertEqual(_resolve_density("full"), 2)
+
+    def test_resolve_density_string_numeric(self):
+        from videoflow.generate import _resolve_density
+        self.assertEqual(_resolve_density("1"), 1)
+        self.assertEqual(_resolve_density("2"), 2)
+        self.assertEqual(_resolve_density("4"), 4)
+        self.assertEqual(_resolve_density("8"), 8)
+
+    def test_resolve_density_int(self):
+        from videoflow.generate import _resolve_density
+        self.assertEqual(_resolve_density(1), 1)
+        self.assertEqual(_resolve_density(2), 2)
+        self.assertEqual(_resolve_density(4), 4)
+        self.assertEqual(_resolve_density(8), 8)
+
+    def test_resolve_density_invalid_raises(self):
+        from videoflow.generate import _resolve_density
+        with self.assertRaises(ValueError):
+            _resolve_density("3")
+        with self.assertRaises(ValueError):
+            _resolve_density(3)
+        with self.assertRaises(ValueError):
+            _resolve_density("dense")
+        with self.assertRaises(ValueError):
+            _resolve_density(None)
+
+    # ------------------------------------------------------------------
+    # Centered model — action counts per density
+    # ------------------------------------------------------------------
+
+    def test_centered_density_1_one_action_per_beat(self):
+        bm = _beat_map(beats=[0, 500, 1000, 1500], energy=[1.0] * 4)
+        curve = beats_to_curve(bm, center=50, stroke_density=1)
+        self.assertEqual(len(curve), 4)
+
+    def test_centered_density_2_matches_full_alias(self):
+        bm = _beat_map(beats=[0, 500, 1000, 1500], energy=[1.0] * 4)
+        a = beats_to_curve(bm, center=50, stroke_density="full")
+        b = beats_to_curve(bm, center=50, stroke_density=2)
+        self.assertEqual(a, b)
+
+    def test_centered_density_4_four_actions_per_beat(self):
+        bm = _beat_map(beats=[0, 1000, 2000], energy=[1.0] * 3)
+        curve = beats_to_curve(bm, center=50, stroke_density=4)
+        self.assertEqual(len(curve), 12)  # 3 beats × 4
+
+    def test_centered_density_8_eight_actions_per_beat(self):
+        bm = _beat_map(beats=[0, 1000, 2000], energy=[1.0] * 3)
+        curve = beats_to_curve(bm, center=50, stroke_density=8)
+        self.assertEqual(len(curve), 24)  # 3 beats × 8
+
+    def test_centered_density_4_alternates_peak_trough(self):
+        """Within a beat at density=4, slots alternate peak/trough/peak/trough."""
+        bm = _beat_map(beats=[0, 1000, 2000], energy=[1.0] * 3)
+        curve = beats_to_curve(bm, center=50, low=10, high=90, stroke_density=4)
+        # First beat's four actions: peak, trough, peak, trough
+        peaks_indices = [0, 2, 4, 6, 8, 10]
+        trough_indices = [1, 3, 5, 7, 9, 11]
+        for i in peaks_indices:
+            self.assertGreater(curve[i][1], 50, f"slot {i} should be a peak")
+        for i in trough_indices:
+            self.assertLess(curve[i][1], 50, f"slot {i} should be a trough")
+
+    def test_centered_density_4_evenly_spaced_within_beat(self):
+        """At 1000ms beats, density=4 places actions at 0, 250, 500, 750ms."""
+        bm = _beat_map(beats=[0, 1000, 2000], energy=[1.0] * 3)
+        curve = beats_to_curve(bm, center=50, stroke_density=4)
+        # First beat's slots
+        times = [t for t, _ in curve[:4]]
+        self.assertEqual(times, [0, 250, 500, 750])
+
+    # ------------------------------------------------------------------
+    # Legacy (uncentered) model
+    # ------------------------------------------------------------------
+
+    def test_legacy_density_2_matches_full_alias(self):
+        bm = _beat_map(beats=[0, 500, 1000, 1500], energy=[1.0] * 4)
+        a = beats_to_curve(bm, low=10, high=90, stroke_density="full")
+        b = beats_to_curve(bm, low=10, high=90, stroke_density=2)
+        self.assertEqual(a, b)
+
+    def test_legacy_density_4_four_actions_per_beat(self):
+        bm = _beat_map(beats=[0, 1000, 2000], energy=[1.0] * 3)
+        curve = beats_to_curve(bm, low=10, high=90, stroke_density=4)
+        self.assertEqual(len(curve), 12)
+        # Even slots = peak (at high), odd = trough (at low)
+        self.assertGreaterEqual(curve[0][1], 50)
+        self.assertEqual(curve[1][1], 10)
+
+    # ------------------------------------------------------------------
+    # Invalid in beats_to_curve
+    # ------------------------------------------------------------------
+
+    def test_beats_to_curve_invalid_density_raises(self):
+        bm = _beat_map(beats=[0, 500], energy=[1.0, 1.0])
+        with self.assertRaises(ValueError):
+            beats_to_curve(bm, stroke_density=3)
+
+
 if __name__ == "__main__":
     unittest.main()

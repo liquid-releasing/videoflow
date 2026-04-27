@@ -403,6 +403,164 @@ class TestAnalyzeBeats(unittest.TestCase):
             analyze_beats("track.mp3")   # no source argument
         mock_lib.effects.hpss.assert_not_called()
 
+    # ------------------------------------------------------------------
+    # tracker parameter — auto / beat_track / plp
+    # ------------------------------------------------------------------
+
+    def test_tracker_invalid_raises_value_error(self):
+        with patch.object(Path, "exists", return_value=True):
+            from videoflow.audio import analyze_beats
+            with self.assertRaises(ValueError) as ctx:
+                analyze_beats("track.mp3", tracker="madmom")
+        self.assertIn("madmom", str(ctx.exception))
+
+    def test_tracker_auto_short_track_uses_beat_track(self):
+        """Track <= 10 min → auto picks beat_track, not plp."""
+        mock_lib = _make_librosa_mock(duration_s=60.0, beat_count=120)
+        with patch("videoflow.audio._librosa", mock_lib), \
+             patch("videoflow.audio._np", __import__("numpy")), \
+             patch.object(Path, "exists", return_value=True):
+            from videoflow.audio import analyze_beats
+            analyze_beats("track.mp3")  # default tracker="auto"
+        mock_lib.beat.beat_track.assert_called_once()
+        mock_lib.beat.plp.assert_not_called()
+
+    def test_tracker_auto_long_track_uses_plp(self):
+        """Track > 10 min → auto picks plp."""
+        import numpy as np
+        mock_lib = _make_librosa_mock(duration_s=900.0, beat_count=64)  # 15 min
+        # PLP returns a pulse curve
+        mock_lib.beat.plp.return_value = np.zeros(2000, dtype=np.float32)
+        # localmax marks every 50th frame as a beat → ~40 beats
+        localmax_arr = np.zeros(2000, dtype=bool)
+        localmax_arr[::50] = True
+        mock_lib.util.localmax.return_value = localmax_arr
+        with patch("videoflow.audio._librosa", mock_lib), \
+             patch("videoflow.audio._np", np), \
+             patch.object(Path, "exists", return_value=True):
+            from videoflow.audio import analyze_beats
+            analyze_beats("track.mp3")  # default tracker="auto"
+        mock_lib.beat.plp.assert_called_once()
+        mock_lib.beat.beat_track.assert_not_called()
+
+    def test_tracker_beat_track_explicit(self):
+        """Explicit tracker='beat_track' overrides auto on long tracks."""
+        mock_lib = _make_librosa_mock(duration_s=1800.0, beat_count=120)  # 30 min
+        with patch("videoflow.audio._librosa", mock_lib), \
+             patch("videoflow.audio._np", __import__("numpy")), \
+             patch.object(Path, "exists", return_value=True):
+            from videoflow.audio import analyze_beats
+            analyze_beats("track.mp3", tracker="beat_track")
+        mock_lib.beat.beat_track.assert_called_once()
+        mock_lib.beat.plp.assert_not_called()
+
+    def test_tracker_plp_explicit_short_track(self):
+        """Explicit tracker='plp' uses PLP even on short tracks."""
+        import numpy as np
+        mock_lib = _make_librosa_mock(duration_s=10.0, beat_count=20)
+        mock_lib.beat.plp.return_value = np.zeros(500, dtype=np.float32)
+        lm = np.zeros(500, dtype=bool)
+        lm[::25] = True
+        mock_lib.util.localmax.return_value = lm
+        with patch("videoflow.audio._librosa", mock_lib), \
+             patch("videoflow.audio._np", np), \
+             patch.object(Path, "exists", return_value=True):
+            from videoflow.audio import analyze_beats
+            analyze_beats("track.mp3", tracker="plp")
+        mock_lib.beat.plp.assert_called_once()
+        mock_lib.beat.beat_track.assert_not_called()
+
+    def test_tracker_plp_returns_valid_beat_map(self):
+        import numpy as np
+        mock_lib = _make_librosa_mock(duration_s=60.0)
+        # Pulse with localmax every 50 frames @ 22050 Hz / 512 hop ≈ 1.16s
+        # → BPM ≈ 60 / 1.16 ≈ 51.7
+        n_frames = 2000
+        pulse = np.zeros(n_frames, dtype=np.float32)
+        mock_lib.beat.plp.return_value = pulse
+        lm = np.zeros(n_frames, dtype=bool)
+        lm[::50] = True  # every 50 frames
+        mock_lib.util.localmax.return_value = lm
+        # frames_to_time: frame * 512 / 22050
+        mock_lib.frames_to_time.side_effect = lambda frames, sr: (
+            np.asarray(frames) * 512 / sr
+        )
+        with patch("videoflow.audio._librosa", mock_lib), \
+             patch("videoflow.audio._np", np), \
+             patch.object(Path, "exists", return_value=True):
+            from videoflow.audio import AudioBeatMap, analyze_beats
+            result = analyze_beats("track.mp3", tracker="plp")
+        self.assertIsInstance(result, AudioBeatMap)
+        self.assertGreater(len(result.beats), 0)
+        self.assertGreater(result.bpm, 0)
+
+    # ------------------------------------------------------------------
+    # locked_bpm
+    # ------------------------------------------------------------------
+
+    def test_locked_bpm_invalid_raises_value_error(self):
+        with patch.object(Path, "exists", return_value=True):
+            from videoflow.audio import analyze_beats
+            with self.assertRaises(ValueError):
+                analyze_beats("track.mp3", locked_bpm=0)
+            with self.assertRaises(ValueError):
+                analyze_beats("track.mp3", locked_bpm=-10)
+
+    def test_locked_bpm_overrides_detected_for_beat_track(self):
+        """locked_bpm pins the reported BPM regardless of librosa's detection."""
+        mock_lib = _make_librosa_mock(bpm=137.0)
+        with patch("videoflow.audio._librosa", mock_lib), \
+             patch("videoflow.audio._np", __import__("numpy")), \
+             patch.object(Path, "exists", return_value=True):
+            from videoflow.audio import analyze_beats
+            result = analyze_beats(
+                "track.mp3", tracker="beat_track", locked_bpm=120.0
+            )
+        self.assertAlmostEqual(result.bpm, 120.0, places=3)
+
+    def test_locked_bpm_passes_start_bpm_to_beat_track(self):
+        mock_lib = _make_librosa_mock()
+        with patch("videoflow.audio._librosa", mock_lib), \
+             patch("videoflow.audio._np", __import__("numpy")), \
+             patch.object(Path, "exists", return_value=True):
+            from videoflow.audio import analyze_beats
+            analyze_beats("track.mp3", tracker="beat_track", locked_bpm=128.0)
+        _, call_kwargs = mock_lib.beat.beat_track.call_args
+        self.assertAlmostEqual(call_kwargs["start_bpm"], 128.0, places=3)
+        self.assertGreaterEqual(call_kwargs["tightness"], 100)
+
+    def test_locked_bpm_narrows_plp_tempo_window(self):
+        import numpy as np
+        mock_lib = _make_librosa_mock(duration_s=60.0)
+        mock_lib.beat.plp.return_value = np.zeros(500, dtype=np.float32)
+        lm = np.zeros(500, dtype=bool)
+        lm[::25] = True
+        mock_lib.util.localmax.return_value = lm
+        with patch("videoflow.audio._librosa", mock_lib), \
+             patch("videoflow.audio._np", np), \
+             patch.object(Path, "exists", return_value=True):
+            from videoflow.audio import analyze_beats
+            analyze_beats("track.mp3", tracker="plp", locked_bpm=140.0)
+        _, call_kwargs = mock_lib.beat.plp.call_args
+        self.assertAlmostEqual(call_kwargs["tempo_min"], 138.0, places=3)
+        self.assertAlmostEqual(call_kwargs["tempo_max"], 142.0, places=3)
+
+    def test_locked_bpm_overrides_detected_for_plp(self):
+        import numpy as np
+        mock_lib = _make_librosa_mock(duration_s=60.0)
+        mock_lib.beat.plp.return_value = np.zeros(500, dtype=np.float32)
+        lm = np.zeros(500, dtype=bool)
+        lm[::25] = True
+        mock_lib.util.localmax.return_value = lm
+        with patch("videoflow.audio._librosa", mock_lib), \
+             patch("videoflow.audio._np", np), \
+             patch.object(Path, "exists", return_value=True):
+            from videoflow.audio import analyze_beats
+            result = analyze_beats(
+                "track.mp3", tracker="plp", locked_bpm=140.0
+            )
+        self.assertAlmostEqual(result.bpm, 140.0, places=3)
+
 
 if __name__ == "__main__":
     unittest.main()

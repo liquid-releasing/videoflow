@@ -165,6 +165,12 @@ class AudioBeatMap:
 
 
 _SOURCES = ("full", "percussive")
+_TRACKERS = ("auto", "beat_track", "plp")
+
+# Above this duration, "auto" tracker switches from librosa.beat.beat_track
+# (single global tempo, dynamic-programming, drifts on long-form material)
+# to librosa.beat.plp (locally-stable tempo, robust over multi-hour tracks).
+PLP_AUTO_DURATION_MS = 10 * 60 * 1000  # 10 minutes
 
 
 def analyze_beats(
@@ -172,6 +178,9 @@ def analyze_beats(
     *,
     sr: int = 22050,
     source: str = "full",
+    tracker: str = "auto",
+    locked_bpm: float | None = None,
+    progress_callback=None,
 ) -> AudioBeatMap:
     """Analyse the beat structure of an audio or video file.
 
@@ -202,6 +211,28 @@ def analyze_beats(
                 and you want beats to follow the drums rather than vocal
                 onsets.  Energy values also reflect percussive energy.
                 No extra dependencies — HPSS is built into librosa.
+        tracker: Beat-tracking algorithm.
+
+                ``"auto"`` (default) — picks ``"plp"`` for tracks longer
+                than 10 minutes, ``"beat_track"`` otherwise. Long-form
+                material drifts under a global-tempo DP tracker; PLP's
+                locally-stable pulse handles multi-hour tracks better.
+
+                ``"beat_track"`` — librosa's classic dynamic-programming
+                beat tracker. Assumes a single global tempo. Best for short
+                tracks (< 10 min) with steady tempo.
+
+                ``"plp"`` — predominant local pulse. Estimates a locally
+                stable tempo per frame; beats are local maxima of the
+                pulse curve. More robust to tempo drift, gradual rallentando,
+                and long-form structure where a global tempo doesn't fit.
+        locked_bpm: If set, pin the reported BPM to this value and bias
+                the tracker toward it. For ``beat_track``, sets
+                ``start_bpm`` and tightens the prior. For ``plp``, narrows
+                the tempo search window to ±2 BPM around the lock. Use
+                when you know the tempo and want the tracker to stop
+                hunting (especially helpful for tracks where
+                auto-detection falls onto a half/double tempo octave).
 
     Returns:
         :class:`AudioBeatMap` with bpm, beats, downbeats, phrases, energy,
@@ -209,13 +240,31 @@ def analyze_beats(
 
     Raises:
         FileNotFoundError: If the input file does not exist.
-        ValueError: If *source* is not a recognised value.
+        ValueError: If *source*, *tracker*, or *locked_bpm* is invalid.
         BeatError: If librosa is not installed or analysis fails.
     """
     if source not in _SOURCES:
         raise ValueError(
             f"source must be one of {list(_SOURCES)!r}, got {source!r}"
         )
+    if tracker not in _TRACKERS:
+        raise ValueError(
+            f"tracker must be one of {list(_TRACKERS)!r}, got {tracker!r}"
+        )
+    if locked_bpm is not None and locked_bpm <= 0:
+        raise ValueError(
+            f"locked_bpm must be positive, got {locked_bpm!r}"
+        )
+
+    def _progress(label: str) -> None:
+        # Thin shim so callers don't have to null-check. We swallow any
+        # exception in the callback — UI feedback should never break
+        # analysis. Each label marks the START of a new stage.
+        if progress_callback is not None:
+            try:
+                progress_callback(label)
+            except Exception:
+                pass
 
     input = Path(input)
     if not input.exists():
@@ -230,6 +279,7 @@ def analyze_beats(
     # For video files, extract audio to a temp WAV via FFmpeg first.
     _tmp_audio = None
     if input.suffix.lower() in _VIDEO_SUFFIXES:
+        _progress("Extracting audio from video (ffmpeg)…")
         # Look for ffmpeg on PATH, then alongside this file, then alongside the input file.
         _ffmpeg = "ffmpeg"
         for _candidate in [
@@ -270,22 +320,72 @@ def analyze_beats(
         load_path = str(input)
 
     try:
+        _progress("Loading audio (librosa)…")
         y, sr_ = _librosa.load(load_path, sr=sr, mono=True)
         duration_ms = round(_librosa.get_duration(y=y, sr=sr_) * 1000)
 
         # Select the signal used for beat tracking and energy.
         # HPSS separates harmonic (voice, melody) from percussive (drums).
         if source == "percussive":
+            _progress("Separating percussive component (HPSS)…")
             _, y_track = _librosa.effects.hpss(y)
         else:
             y_track = y
 
-        tempo, beat_frames = _librosa.beat.beat_track(y=y_track, sr=sr_)
-        beat_times = _librosa.frames_to_time(beat_frames, sr=sr_)
+        # Resolve "auto" → concrete tracker by track length.
+        resolved_tracker = tracker
+        if resolved_tracker == "auto":
+            resolved_tracker = (
+                "plp" if duration_ms > PLP_AUTO_DURATION_MS else "beat_track"
+            )
 
-        bpm = float(_np.atleast_1d(tempo)[0])
-        beats_ms = [round(float(t) * 1000) for t in beat_times]
+        if resolved_tracker == "plp":
+            _progress("Detecting beats (PLP — long-form stable)…")
+            # PLP — predominant local pulse. Robust on long-form material
+            # where the global tempo drifts. Beats are local maxima of the
+            # pulse envelope.
+            plp_kwargs: dict = {"y": y_track, "sr": sr_}
+            if locked_bpm is not None:
+                # Narrow the tempo search around the lock so PLP stops
+                # hunting across tempo octaves.
+                plp_kwargs["tempo_min"] = max(1.0, locked_bpm - 2.0)
+                plp_kwargs["tempo_max"] = locked_bpm + 2.0
+            pulse = _librosa.beat.plp(**plp_kwargs)
+            beat_frames = _np.flatnonzero(_librosa.util.localmax(pulse))
+            beat_times = _librosa.frames_to_time(beat_frames, sr=sr_)
 
+            beats_ms = [round(float(t) * 1000) for t in beat_times]
+            if locked_bpm is not None:
+                bpm = float(locked_bpm)
+            elif len(beats_ms) >= 2:
+                # Median inter-beat interval → BPM.
+                deltas = [
+                    beats_ms[i + 1] - beats_ms[i]
+                    for i in range(len(beats_ms) - 1)
+                ]
+                deltas.sort()
+                median_delta = deltas[len(deltas) // 2]
+                bpm = 60_000.0 / median_delta if median_delta > 0 else 0.0
+            else:
+                bpm = 0.0
+        else:
+            _progress("Detecting beats (beat_track)…")
+            # Classic beat_track — global-tempo dynamic programming.
+            bt_kwargs: dict = {"y": y_track, "sr": sr_}
+            if locked_bpm is not None:
+                bt_kwargs["start_bpm"] = float(locked_bpm)
+                bt_kwargs["tightness"] = 200  # lock harder to start_bpm
+            tempo, beat_frames = _librosa.beat.beat_track(**bt_kwargs)
+            beat_times = _librosa.frames_to_time(beat_frames, sr=sr_)
+
+            bpm = (
+                float(locked_bpm)
+                if locked_bpm is not None
+                else float(_np.atleast_1d(tempo)[0])
+            )
+            beats_ms = [round(float(t) * 1000) for t in beat_times]
+
+        _progress("Computing phrases + per-beat energy…")
         # Downbeats: every 4th beat (assume 4/4 time, V1)
         downbeats_ms = beats_ms[::4]
 
