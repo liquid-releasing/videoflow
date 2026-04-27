@@ -61,6 +61,10 @@ def beats_to_curve(
     high: int = 90,
     min_stroke: int = 20,
     center: int | None = None,
+    center_trajectory: tuple[int, int] | None = None,
+    tone_per_phrase: list[tuple[int, int, int, int]] | None = None,
+    energy_normalize: bool = False,
+    stroke_density: str = "half",
 ) -> list[tuple[int, int]]:
     """Convert an :class:`~videoflow.audio.AudioBeatMap` into a raw motion curve.
 
@@ -102,23 +106,108 @@ def beats_to_curve(
     if not beat_map.beats:
         return []
 
+    # Optionally normalise energy so the 95th-percentile-loudest beat hits
+    # 1.0 — guarantees the loudest beats actually reach `high` / `low`
+    # instead of compressing into the middle when the track's raw RMS
+    # values never approach 1.0. Capped at 1.0 so a single outlier beat
+    # doesn't suppress everything else.
+    energies = list(beat_map.energy)
+    if energy_normalize and energies:
+        sorted_e = sorted(energies)
+        ref = sorted_e[int(len(sorted_e) * 0.95)] or sorted_e[-1]
+        if ref > 0:
+            energies = [min(1.0, e / ref) for e in energies]
+
+    # Pre-compute half-beat durations for "full" density mode
+    beats_list = list(beat_map.beats)
+    if len(beats_list) >= 2:
+        deltas = sorted(beats_list[i + 1] - beats_list[i] for i in range(len(beats_list) - 1))
+        median_beat_dur = deltas[len(deltas) // 2]
+    else:
+        median_beat_dur = 480  # 125 BPM fallback
+
+    def _next_dur(i: int) -> int:
+        if i + 1 < len(beats_list):
+            return beats_list[i + 1] - beats_list[i]
+        return median_beat_dur
+
+    # Resolve a per-beat center function. center_trajectory takes priority;
+    # it's the first "tone" primitive — a linearly-interpolated center
+    # position from start to end of the track. (50, 50) = flat (current
+    # default). (30, 70) = rising. (70, 30) = falling. Future tones layer
+    # amplitude/density/mode trajectories on top of this same shape.
+    track_start = beats_list[0] if beats_list else 0
+    track_end = beats_list[-1] if beats_list else 1
+    track_dur = max(track_end - track_start, 1)
+
+    def center_at(t: int) -> int:
+        # Per-phrase tone takes priority — picks the segment containing t
+        # and interpolates within it. Falls back to track-wide trajectory,
+        # then to constant center.
+        if tone_per_phrase:
+            for ps, pe, sc, ec in tone_per_phrase:
+                if ps <= t < pe:
+                    span = max(1, pe - ps)
+                    progress = max(0.0, min(1.0, (t - ps) / span))
+                    return int(round(sc + (ec - sc) * progress))
+            # past end of last segment — clamp to last segment's end
+            ps, pe, sc, ec = tone_per_phrase[-1]
+            return ec
+        if center_trajectory is not None:
+            start_c, end_c = center_trajectory
+            progress = (t - track_start) / track_dur
+            progress = max(0.0, min(1.0, progress))
+            return int(round(start_c + (end_c - start_c) * progress))
+        return center if center is not None else 0  # 0 = unused in legacy path
+
     curve: list[tuple[int, int]] = []
 
-    if center is not None:
+    use_centered = (
+        center is not None
+        or center_trajectory is not None
+        or tone_per_phrase is not None
+    )
+    if use_centered:
         max_half = (high - low) / 2
         min_half = min_stroke / 2
-        for i, (beat_ms, energy) in enumerate(zip(beat_map.beats, beat_map.energy)):
+
+        if stroke_density == "full":
+            # Two actions per beat: peak at beat time, trough at midpoint to
+            # next beat. Each beat traces one complete stroke.
+            for i, (beat_ms, energy) in enumerate(zip(beats_list, energies)):
+                half = max(min_half, max_half * energy)
+                c_peak = center_at(beat_ms)
+                trough_t = beat_ms + _next_dur(i) // 2
+                c_trough = center_at(trough_t)
+                peak = min(100, round(c_peak + half))
+                trough = max(0, round(c_trough - half))
+                curve.append((beat_ms, peak))
+                curve.append((trough_t, trough))
+            return curve
+
+        # Half density (default): alternate peak/trough across beats.
+        # One stroke spans two beats — calmer, longer-cycle motion.
+        for i, (beat_ms, energy) in enumerate(zip(beats_list, energies)):
             half = max(min_half, max_half * energy)
+            c = center_at(beat_ms)
             if i % 2 == 0:
-                pos = min(100, round(center + half))
+                pos = min(100, round(c + half))
             else:
-                pos = max(0, round(center - half))
+                pos = max(0, round(c - half))
             curve.append((beat_ms, pos))
         return curve
 
-    for i, (beat_ms, energy) in enumerate(zip(beat_map.beats, beat_map.energy)):
+    # Legacy (uncentered) — same density choice
+    if stroke_density == "full":
+        for i, (beat_ms, energy) in enumerate(zip(beats_list, energies)):
+            amplitude = max(min_stroke, round((high - low) * energy))
+            peak = min(100, low + amplitude)
+            curve.append((beat_ms, peak))
+            curve.append((beat_ms + _next_dur(i) // 2, low))
+        return curve
+
+    for i, (beat_ms, energy) in enumerate(zip(beats_list, energies)):
         if i % 2 == 0:
-            # Peak — scale amplitude by energy, enforce minimum stroke
             amplitude = max(min_stroke, round((high - low) * energy))
             pos = min(100, low + amplitude)
         else:
@@ -126,6 +215,67 @@ def beats_to_curve(
         curve.append((beat_ms, pos))
 
     return curve
+
+
+# ---------------------------------------------------------------------------
+# Auto-tone — per-phrase center trajectory from energy slope
+# ---------------------------------------------------------------------------
+
+def compute_auto_tone(
+    beat_map: AudioBeatMap,
+    *,
+    baseline: int = 50,
+    swing: int = 20,
+) -> list[tuple[int, int, int, int]]:
+    """Per-phrase center trajectory derived from each phrase's energy slope.
+
+    For each phrase, fit a line to its beat-level energies. A rising slope
+    means the phrase is building (more intensity / density / drone weight
+    over the phrase) — its center starts lower and ends higher. A falling
+    slope means the phrase relaxes — center starts higher and ends lower.
+    A flat slope keeps center near baseline.
+
+    Works on **musical movement** broadly, not just melody — drones and
+    rhythmic-only phrases produce a non-zero slope too because their energy
+    builds and decays through layered onsets, even with static pitch.
+
+    Args:
+        beat_map: Result of :func:`~videoflow.audio.analyze_beats`.
+        baseline: Center value the trajectory swings around (0–100).
+            Default 50 (mid-stroke).
+        swing: Maximum total swing of one phrase, in position units. With
+            swing=20 a fully-rising phrase goes from baseline-10 to
+            baseline+10. Default 20.
+
+    Returns:
+        List of ``(start_ms, end_ms, start_center, end_center)`` tuples,
+        one per phrase. Pass directly to ``beats_to_curve(tone_per_phrase=…)``.
+    """
+    segments: list[tuple[int, int, int, int]] = []
+    energies = list(beat_map.energy)
+    for start_ms, end_ms in beat_map.phrases:
+        idx = [
+            i for i, b in enumerate(beat_map.beats)
+            if start_ms <= b < end_ms
+        ]
+        if len(idx) < 2:
+            segments.append((start_ms, end_ms, baseline, baseline))
+            continue
+
+        phrase_e = [energies[i] for i in idx]
+        n = len(phrase_e)
+        x_mean = (n - 1) / 2
+        y_mean = sum(phrase_e) / n
+        num = sum((i - x_mean) * (e - y_mean) for i, e in enumerate(phrase_e))
+        den = sum((i - x_mean) ** 2 for i in range(n))
+        slope = num / den if den > 0 else 0.0
+
+        # Normalise: a slope that climbs 1.0 energy unit across the phrase
+        # = full swing in one direction. Clip to ±1 for stability.
+        rise = max(-1.0, min(1.0, slope * (n - 1)))
+        delta = int(round(swing * rise / 2))
+        segments.append((start_ms, end_ms, baseline - delta, baseline + delta))
+    return segments
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +363,8 @@ def shape_curve(
     *,
     low: int = 10,
     center: int | None = None,
+    center_trajectory: tuple[int, int] | None = None,
+    tone_per_phrase: list[tuple[int, int, int, int]] | None = None,
 ) -> list[tuple[int, int]]:
     """Apply mode-aware amplitude shaping to a raw motion curve.
 
@@ -256,6 +408,28 @@ def shape_curve(
                 return start, end, mode
         return modes[-1]
 
+    # Resolve a per-time center value (mirrors beats_to_curve). When the
+    # trajectory rises or falls across the track, the compression in
+    # shape_curve has to scale toward the *current* center, not a constant.
+    track_start = curve[0][0] if curve else 0
+    track_end = curve[-1][0] if curve else 1
+    track_dur = max(track_end - track_start, 1)
+
+    def center_at(t: int) -> int | None:
+        if tone_per_phrase:
+            for ps, pe, sc, ec in tone_per_phrase:
+                if ps <= t < pe:
+                    span = max(1, pe - ps)
+                    progress = max(0.0, min(1.0, (t - ps) / span))
+                    return int(round(sc + (ec - sc) * progress))
+            return tone_per_phrase[-1][3]  # past end → last segment's end
+        if center_trajectory is not None:
+            start_c, end_c = center_trajectory
+            progress = (t - track_start) / track_dur
+            progress = max(0.0, min(1.0, progress))
+            return int(round(start_c + (end_c - start_c) * progress))
+        return center
+
     shaped: list[tuple[int, int]] = []
 
     for t, pos in curve:
@@ -268,8 +442,9 @@ def shape_curve(
         else:
             scale = _MODE_HIGH_SCALE.get(mode, _MODE_HIGH_SCALE["steady"])
 
-        if center is not None:
-            new_pos = round(center + (pos - center) * scale)
+        c = center_at(t)
+        if c is not None:
+            new_pos = round(c + (pos - c) * scale)
             shaped.append((t, max(0, min(100, new_pos))))
             continue
 
@@ -353,6 +528,10 @@ def generate_from_beats(
     low: int = 10,
     high: int = 90,
     center: int | None = None,
+    center_trajectory: tuple[int, int] | None = None,
+    tone_per_phrase: list[tuple[int, int, int, int]] | None = None,
+    energy_normalize: bool = False,
+    stroke_density: str = "half",
     title: str = "",
 ) -> Path:
     """Full pipeline: :class:`~videoflow.audio.AudioBeatMap` → ``.funscript``.
@@ -379,7 +558,19 @@ def generate_from_beats(
         beat_map = analyze_beats("track.mp3", source="percussive")
         path = generate_from_beats(beat_map, "track.funscript", center=50)
     """
-    curve = beats_to_curve(beat_map, low=low, high=high, center=center)
+    curve = beats_to_curve(
+        beat_map,
+        low=low, high=high, center=center,
+        center_trajectory=center_trajectory,
+        tone_per_phrase=tone_per_phrase,
+        energy_normalize=energy_normalize,
+        stroke_density=stroke_density,
+    )
     modes = classify_modes(beat_map)
-    shaped = shape_curve(curve, modes, low=low, center=center)
+    shaped = shape_curve(
+        curve, modes,
+        low=low, center=center,
+        center_trajectory=center_trajectory,
+        tone_per_phrase=tone_per_phrase,
+    )
     return export_funscript(shaped, output, title=title)
