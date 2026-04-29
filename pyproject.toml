@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "videoflow"
-version = "0.0.1"
+version = "0.0.5-alpha"
 description = "Audio analysis + funscript generation engine — beats, phrase classification, curve shaping. Powers forgegen's audio-to-funscript pipeline."
 readme = "README.md"
 requires-python = ">=3.11"
