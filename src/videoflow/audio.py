@@ -5,10 +5,12 @@ from __future__ import annotations
 import dataclasses
 import json
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 _VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 # Optional dependency — imported at module level so tests can patch it.
 try:
@@ -304,6 +306,7 @@ def analyze_beats(
                 check=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                creationflags=_NO_WINDOW,
             )
         except FileNotFoundError:
             Path(_tmp_audio.name).unlink(missing_ok=True)

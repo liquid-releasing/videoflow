@@ -41,9 +41,11 @@ from __future__ import annotations
 import dataclasses
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 _VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 class ChapterError(RuntimeError):
@@ -164,6 +166,7 @@ def read_mp4_chapters(media_path: str | Path) -> list[Chapter] | None:
             check=True,
             capture_output=True,
             text=True,
+            creationflags=_NO_WINDOW,
         )
     except (FileNotFoundError, subprocess.CalledProcessError):
         return None
