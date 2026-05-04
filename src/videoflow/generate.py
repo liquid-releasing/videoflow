@@ -327,13 +327,15 @@ def compute_auto_tone(
 
 def classify_modes(
     beat_map: AudioBeatMap,
+    *,
+    chapters: list | None = None,
 ) -> list[tuple[int, int, str]]:
     """Label each musical phrase with a behavioural mode.
 
-    Modes are determined by phrase-level energy statistics and the overall
-    BPM. No ML required — purely rule-based.
+    Modes are rule-based — no ML. Two classification regimes:
 
-    Mode rules (evaluated in priority order):
+    **Whole-file** (default, ``chapters=None``):
+    Phrase-level energy compared against absolute thresholds.
 
     ======== ================================================================
     Mode     Rule
@@ -347,12 +349,37 @@ def classify_modes(
     steady   Everything else — the normal case
     ======== ================================================================
 
+    **Chapter-aware** (``chapters`` is a list of
+    :class:`videoflow.chapters.Chapter`): each chapter computes its own
+    energy reference (median + 75th percentile) and BPM (from beat
+    density within the chapter). Phrases are classified relative to
+    their chapter's stats so a quiet phrase in a quiet ambient chunk
+    isn't auto-mapped to ``break`` just because its absolute energy is
+    low — it can still be ``steady`` or ``slow`` if it's average for
+    its chapter. This is the lever that fixes the ambient flat-output
+    problem the whole-file regime suffers from.
+
     Args:
         beat_map: Result of :func:`~videoflow.audio.analyze_beats`.
+        chapters: Optional chapter list (typically from
+            :func:`videoflow.structural.auto_chapter`). When provided,
+            classification runs per-chapter with chunk-relative
+            thresholds.
 
     Returns:
         List of ``(start_ms, end_ms, mode)`` tuples, one per phrase.
         Covers the entire duration of the beat map.
+    """
+    if chapters:
+        return _classify_modes_per_chapter(beat_map, chapters)
+    return _classify_modes_whole(beat_map)
+
+
+def _classify_modes_whole(
+    beat_map: AudioBeatMap,
+) -> list[tuple[int, int, str]]:
+    """Original whole-file classification — kept for backwards compatibility
+    and for short-file analysis where chapter awareness adds no value.
     """
     modes: list[tuple[int, int, str]] = []
 
@@ -368,15 +395,7 @@ def classify_modes(
 
         phrase_energy = [beat_map.energy[i] for i in indices]
         avg = sum(phrase_energy) / len(phrase_energy)
-
-        # Energy trend: compare second half vs first half average
-        mid = len(phrase_energy) // 2
-        if mid > 0:
-            first_avg = sum(phrase_energy[:mid]) / mid
-            second_avg = sum(phrase_energy[mid:]) / max(1, len(phrase_energy) - mid)
-            trend = second_avg - first_avg
-        else:
-            trend = 0.0
+        trend, _ = _energy_trend(phrase_energy)
 
         if avg < 0.15:
             mode = "break"
@@ -394,6 +413,119 @@ def classify_modes(
         modes.append((start_ms, end_ms, mode))
 
     return modes
+
+
+def _classify_modes_per_chapter(
+    beat_map: AudioBeatMap,
+    chapters: list,
+) -> list[tuple[int, int, str]]:
+    """Chunk-relative classification.
+
+    For each chapter, computes:
+    - per-chunk median + 75th-percentile beat energies
+    - per-chunk BPM (from beat density inside the chunk)
+
+    Then classifies each phrase against THAT chunk's stats. A phrase is
+    ``break`` when it's significantly quieter than its chapter's median;
+    ``tease`` when below median; ``steady`` when near or above median;
+    ``edging`` when rising into the chunk's top quartile.
+
+    Result: ambient chapters land mostly in ``steady`` (0.78× amplitude)
+    instead of being crushed to ``break``/``tease`` (0.12-0.38×).
+    """
+    out: list[tuple[int, int, str]] = []
+    for ch in chapters:
+        ch_start = ch.at_ms
+        ch_end = ch.end_ms if ch.end_ms is not None else beat_map.duration_ms
+
+        # Phrases that start within the chunk (use phrase start as the
+        # membership criterion so phrases never split across chunks).
+        chunk_phrases = [
+            (s, e) for s, e in beat_map.phrases if ch_start <= s < ch_end
+        ]
+        if not chunk_phrases:
+            continue
+
+        chunk_beat_indices = [
+            i for i, b in enumerate(beat_map.beats) if ch_start <= b < ch_end
+        ]
+        chunk_energies = [beat_map.energy[i] for i in chunk_beat_indices]
+
+        if not chunk_energies:
+            for s, e in chunk_phrases:
+                out.append((s, e, "break"))
+            continue
+
+        # Per-chunk reference statistics — used as relative thresholds
+        # in place of the whole-file regime's absolute 0.15 / 0.30 cuts.
+        # Proper median (avg of two middles for even length) so a bimodal
+        # chunk doesn't anchor on the upper mode.
+        sorted_e = sorted(chunk_energies)
+        n = len(sorted_e)
+        if n % 2 == 1:
+            chunk_median = sorted_e[n // 2]
+        else:
+            chunk_median = (sorted_e[n // 2 - 1] + sorted_e[n // 2]) / 2.0
+
+        # Per-chunk BPM from beat density in the chunk. More accurate
+        # than beat_map.bpm (which is the duration-weighted mean across
+        # chapters) when chapters have different tempos.
+        chunk_duration_min = max(1e-6, (ch_end - ch_start) / 60_000.0)
+        chunk_bpm = len(chunk_beat_indices) / chunk_duration_min
+
+        # break threshold floors at 0.10 absolute so true silence is
+        # still detected even in chunks whose median is itself near
+        # silent. Without the floor, a fully-silent chunk would get
+        # `chunk_median ≈ 0` and nothing would qualify as break.
+        break_threshold = max(chunk_median * 0.4, 0.10)
+        tease_threshold = chunk_median * 0.85
+
+        for start_ms, end_ms in chunk_phrases:
+            ph_indices = [
+                i for i, b in enumerate(beat_map.beats)
+                if start_ms <= b < end_ms
+            ]
+            if not ph_indices:
+                out.append((start_ms, end_ms, "break"))
+                continue
+
+            phrase_energy = [beat_map.energy[i] for i in ph_indices]
+            avg = sum(phrase_energy) / len(phrase_energy)
+            trend, second_avg = _energy_trend(phrase_energy)
+
+            # edging requires both rising AND ending above chunk-typical
+            # — a phrase that climbs from quiet to loud, peaking above
+            # the chunk median.
+            if avg < break_threshold:
+                mode = "break"
+            elif trend >= 0.15 and second_avg >= chunk_median:
+                mode = "edging"
+            elif chunk_bpm >= 140:
+                mode = "fast"
+            elif chunk_bpm <= 75:
+                mode = "slow"
+            elif avg < tease_threshold:
+                mode = "tease"
+            else:
+                mode = "steady"
+
+            out.append((start_ms, end_ms, mode))
+
+    return out
+
+
+def _energy_trend(phrase_energy: list[float]) -> tuple[float, float]:
+    """Per-phrase energy slope: returns ``(trend, second_avg)`` where trend
+    is second-half-average minus first-half-average. Returning second_avg
+    too lets callers test "is the phrase peaking?" without recomputing.
+    """
+    mid = len(phrase_energy) // 2
+    if mid <= 0:
+        avg = phrase_energy[0] if phrase_energy else 0.0
+        return 0.0, avg
+    first_avg = sum(phrase_energy[:mid]) / mid
+    second_avg = sum(phrase_energy[mid:]) / max(1, len(phrase_energy) - mid)
+    return second_avg - first_avg, second_avg
 
 
 # ---------------------------------------------------------------------------

@@ -172,6 +172,118 @@ class TestClassifyModes(unittest.TestCase):
         self.assertEqual(modes[1][1], 6000)
 
 
+class TestClassifyModesPerChapter(unittest.TestCase):
+    """Chunk-relative classification — the architectural fix for ambient
+    flat output. Verifies a phrase that's quiet in absolute terms can
+    still get ``steady``/``slow``/``edging`` if it's normal-or-loud
+    relative to its chapter's distribution.
+    """
+
+    def test_ambient_phrase_gets_steady_when_chunk_is_uniformly_quiet(self):
+        """The whole-file regime would map this to break/tease. Chunk-aware
+        sees the phrase is at the chunk's median, so it's "average" → steady.
+        """
+        from videoflow.chapters import Chapter
+        beats = list(range(0, 8000, 500))
+        # All phrases at uniform low energy 0.2 — whole-file would say tease;
+        # chunk-aware says everyone is at the median → steady (BPM=120, not
+        # fast or slow).
+        energy = [0.2] * len(beats)
+        bm = _beat_map(
+            bpm=120.0, beats=beats, energy=energy,
+            phrases=[(0, 4000), (4000, 8000)], duration_ms=8000,
+        )
+        whole = classify_modes(bm)
+        self.assertEqual([m[2] for m in whole], ["tease", "tease"])
+
+        chapter_aware = classify_modes(
+            bm, chapters=[Chapter(at_ms=0, end_ms=8000)],
+        )
+        self.assertEqual([m[2] for m in chapter_aware], ["steady", "steady"])
+
+    def test_truly_silent_phrase_still_gets_break_via_floor(self):
+        """The chunk-aware regime keeps an absolute 0.10 floor for break so
+        a silent phrase can't escape break-mode just because the whole chunk
+        is silent.
+        """
+        from videoflow.chapters import Chapter
+        beats = list(range(0, 4000, 500))
+        energy = [0.02] * len(beats)
+        bm = _beat_map(beats=beats, energy=energy, phrases=[(0, 4000)])
+        modes = classify_modes(
+            bm, chapters=[Chapter(at_ms=0, end_ms=4000)],
+        )
+        self.assertEqual(modes[0][2], "break")
+
+    def test_phrase_below_chunk_median_gets_tease(self):
+        """A phrase below chunk median, but above the break floor, → tease."""
+        from videoflow.chapters import Chapter
+        beats = list(range(0, 8000, 500))
+        # Chunk median ≈ 0.5 (avg of two middle values). Break floor is
+        # max(0.5*0.4, 0.10) = 0.20. Tease threshold = 0.5 * 0.85 = 0.425.
+        # First phrase avg=0.30 is between break (0.20) and tease (0.425).
+        energy = [0.30] * 8 + [0.7] * 8
+        bm = _beat_map(
+            bpm=120.0, beats=beats, energy=energy,
+            phrases=[(0, 4000), (4000, 8000)], duration_ms=8000,
+        )
+        modes = classify_modes(
+            bm, chapters=[Chapter(at_ms=0, end_ms=8000)],
+        )
+        self.assertEqual(modes[0][2], "tease")
+        self.assertIn(modes[1][2], {"steady", "edging"})
+
+    def test_per_chunk_bpm_independent_of_global_bpm(self):
+        """Chunk BPM is computed from beat density inside the chunk, not from
+        beat_map.bpm. A chunk with 60 beats over 30 seconds → 120 BPM
+        regardless of what beat_map.bpm says.
+        """
+        from videoflow.chapters import Chapter
+        # 60 beats spread over 30s → 120 BPM
+        beats = list(range(0, 30000, 500))
+        energy = [0.6] * len(beats)
+        bm = _beat_map(
+            bpm=200.0,  # global bpm says fast
+            beats=beats, energy=energy,
+            phrases=[(0, 30000)], duration_ms=30000,
+        )
+        # Whole-file: BPM 200 → fast
+        self.assertEqual(classify_modes(bm)[0][2], "fast")
+        # Chapter-aware: chunk BPM is 120 → steady (not fast)
+        modes = classify_modes(bm, chapters=[Chapter(at_ms=0, end_ms=30000)])
+        self.assertEqual(modes[0][2], "steady")
+
+    def test_two_chapters_classified_independently(self):
+        from videoflow.chapters import Chapter
+        # First chunk: uniformly quiet (will steady-ify with chunk-relative)
+        # Second chunk: rising energy (edging candidate)
+        beats = list(range(0, 16000, 500))
+        first_phrase_energy = [0.2] * 16
+        second_phrase_energy = [0.3] * 8 + [0.9] * 8  # rising
+        energy = first_phrase_energy + second_phrase_energy
+        bm = _beat_map(
+            bpm=120.0, beats=beats, energy=energy,
+            phrases=[(0, 8000), (8000, 16000)],
+            duration_ms=16000,
+        )
+        chapters = [
+            Chapter(at_ms=0, end_ms=8000),
+            Chapter(at_ms=8000, end_ms=16000),
+        ]
+        modes = classify_modes(bm, chapters=chapters)
+        self.assertEqual(modes[0][2], "steady")        # quiet chunk
+        self.assertEqual(modes[1][2], "edging")        # rising chunk
+
+    def test_empty_chapters_falls_back_to_whole_file(self):
+        from videoflow.chapters import Chapter  # noqa: F401
+        beats = list(range(0, 4000, 500))
+        energy = [0.05] * len(beats)
+        bm = _beat_map(beats=beats, energy=energy, phrases=[(0, 4000)])
+        whole = classify_modes(bm)
+        empty_chap = classify_modes(bm, chapters=[])
+        self.assertEqual(whole, empty_chap)
+
+
 # ---------------------------------------------------------------------------
 # shape_curve
 # ---------------------------------------------------------------------------
