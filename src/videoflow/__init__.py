@@ -13,6 +13,7 @@ from videoflow.analysis import (
     detect_scenes,
 )
 from videoflow.audio import AudioBeatMap, BeatError, analyze_beats
+from videoflow.chapters import Chapter, ChapterError, load_chapters
 from videoflow.generate import (
     GenerateError,
     beats_to_curve,
@@ -21,6 +22,7 @@ from videoflow.generate import (
     generate_from_beats,
     shape_curve,
 )
+from videoflow.structural import AutoChapterError, auto_chapter
 
 __all__ = [
     "DETECTOR_INFO",
@@ -31,6 +33,11 @@ __all__ = [
     "AudioBeatMap",
     "BeatError",
     "analyze_beats",
+    "Chapter",
+    "ChapterError",
+    "load_chapters",
+    "AutoChapterError",
+    "auto_chapter",
     "GenerateError",
     "beats_to_curve",
     "classify_modes",

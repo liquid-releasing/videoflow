@@ -56,30 +56,52 @@ class ChapterError(RuntimeError):
 class Chapter:
     """One chapter on a track's timeline.
 
+    A chapter serves two roles in the lqr toolchain — generation
+    segmentation (forgegen uses it as an analysis chunk boundary) and
+    navigation waypoint (forgeplayer / forgeassembler / FunscriptForge
+    use it as a section the user navigates / cuts / overlays). The
+    same record carries fields for both; consumers read what they need.
+    See ``videoflow/docs/architecture/audio-structure-primitive.md``.
+
     Attributes:
         at_ms: Start time in milliseconds.
         end_ms: End time in milliseconds. ``None`` means "until the next
             chapter or end of track" — common for sources that only
             store start times (mp4 chapters, funscript ``metadata.chapters``).
         name: Optional human label (e.g. ``"build 1"``). Defaults to
-            empty string.
+            empty string. Navigation-flavored.
         intent: Optional intent label from the chapter intent vocabulary
             (e.g. ``"intro"``, ``"build"``, ``"sustain"``, ``"edge"``,
             ``"climax"``, ``"recover"``, ``"outro"``). Open string in
             v0.0.4; v0.0.5 locks the 7-element vocabulary alongside
-            chapter intent biasing.
+            chapter intent biasing. Navigation-flavored.
+        content_type: Audio content-type heuristic from
+            :mod:`videoflow.structural` auto-detection — one of
+            ``"music"``, ``"ambient"``, ``"mixed"``, or ``""`` when not
+            classified. Generation-flavored.
+        confidence: Detection confidence in ``[0.0, 1.0]`` from
+            auto-detection, or ``None`` when authored / unknown.
+            Generation-flavored.
+        evidence: Identifiers of the analysis features that produced
+            this chapter — e.g. ``["recurrence_matrix", "silence",
+            "rms_variance"]``. Empty list for authored chapters.
+            Generation-flavored.
     """
 
     at_ms: int
     end_ms: int | None = None
     name: str = ""
     intent: str = ""
+    content_type: str = ""
+    confidence: float | None = None
+    evidence: list[str] = dataclasses.field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Return a JSON-serialisable dict.
 
-        Omits ``end_ms`` when ``None`` so author-shape chapters stay
-        compact.
+        Omits ``end_ms`` when ``None`` and the analytical fields
+        (``content_type`` / ``confidence`` / ``evidence``) when at
+        their defaults — authored chapters stay compact.
         """
         out: dict = {
             "at_ms": self.at_ms,
@@ -88,6 +110,12 @@ class Chapter:
         }
         if self.end_ms is not None:
             out["end_ms"] = self.end_ms
+        if self.content_type:
+            out["content_type"] = self.content_type
+        if self.confidence is not None:
+            out["confidence"] = self.confidence
+        if self.evidence:
+            out["evidence"] = list(self.evidence)
         return out
 
     @classmethod
@@ -97,6 +125,8 @@ class Chapter:
         Accepts both the *authored* shape (``at_ms`` or legacy ``at``)
         and the analysis-schema *proposal* shape (``start_ms`` /
         ``end_ms`` / ``intent_proposal``). The first present field wins.
+        Analytical fields (``content_type``, ``confidence``, ``evidence``)
+        are read when present, otherwise default.
 
         Raises:
             ChapterError: If neither ``at_ms``, ``at``, nor ``start_ms``
@@ -119,7 +149,21 @@ class Chapter:
 
         intent = str(data.get("intent") or data.get("intent_proposal") or "")
         name = str(data.get("name") or "")
-        return cls(at_ms=at_ms, end_ms=end_ms, name=name, intent=intent)
+        content_type = str(data.get("content_type") or "")
+        confidence = data.get("confidence")
+        if confidence is not None:
+            confidence = float(confidence)
+        evidence_raw = data.get("evidence") or []
+        evidence = [str(e) for e in evidence_raw] if isinstance(evidence_raw, list) else []
+        return cls(
+            at_ms=at_ms,
+            end_ms=end_ms,
+            name=name,
+            intent=intent,
+            content_type=content_type,
+            confidence=confidence,
+            evidence=evidence,
+        )
 
 
 # ---------------------------------------------------------------------------
