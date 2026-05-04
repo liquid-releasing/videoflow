@@ -96,12 +96,58 @@ The existing `progress_callback` hook (added in videoflow 0.0.4 for staged feedb
 
 Every consumer imports the same `videoflow.structural` primitive. None of them is special.
 
-| Consumer | What it consumes | Why |
-|---|---|---|
-| **forgegen** | Chapter list driving `analyze_beats(chapters=...)` | The immediate driver. Per-chapter analysis dissolves the mode-shaping ceiling and the whole-file normalization problem in one stroke. |
-| **forgeplayer** | Auto-chapters when MP4 has no embedded chapters | Existing chapter-nav UI already exists; this gives it material to work with on raw long-form content. |
-| **forgeassembler** | Suggested cut points | When a creator wants to slice a long source into clips, audio structure is the right place to suggest cuts. |
-| **FunscriptForge** | Audio-chapter overlay in the editor | Render audio-chapter boundaries as a second ruler track alongside FunscriptForge's existing funscript-phrase boundaries. When the two rulers align: a clean section to apply a transform to. When they diverge: a teaching moment for the creator. **Cross-signal feature audio-only and funscript-only tools cannot deliver.** |
+| Consumer | Role | What it consumes | What it produces / writes back |
+|---|---|---|---|
+| **forgegen** | The "easy button": *just get me a funscript.* | Auto-runs `auto_chapter()` on the source if no `<stem>.chapters.json` exists, then drives `analyze_beats(chapters=...)` per-chapter. **No chapter editor UI** — chapters are a means to the funscript, not a thing the user touches. Per-chapter progress events are still rendered (engagement during the long load). | Writes the freshly-detected chapter list to `<stem>.chapters.json` so downstream tools have something to refine. Writes `<stem>.analysis.json` with `structural.chapter_proposals` provenance. The funscript itself is the user-facing artifact. |
+| **forgeplayer** | Playback only. | Sidecar chapters via the existing resolver. | Read-only. Renders chapter-nav. Never edits. |
+| **forgeassembler** | *Clip assembly editor.* The user is already cutting; chapter editing rides along. | Sidecar chapters as suggested cut points. | Sidecar I/O — split, merge, drag boundaries, **mark chapters excluded from the assembled output** (drop commercials, ambient sections, bad takes). Plus user-preference export: per-chapter file split, mux into output MP4, etc. |
+| **FunscriptForge** | *Funscript editor.* The user is already editing a timeline; chapter editing rides along. | Sidecar chapters as a second ruler-track overlay alongside funscript phrases. `<stem>.analysis.json` for forgegen-time provenance. | Sidecar I/O — split, merge, drag boundaries, **mark chapters excluded from the funscript** (skip a slow intro or section the creator doesn't want scripted). Plus user-preference export: MP4 metadata, embed into funscript metadata block. **Cross-signal feature audio-only and funscript-only tools cannot deliver.** |
+
+### Where chapter editing lives — and where it doesn't
+
+**Auto-detection + sidecar write** are videoflow's responsibility (via the
+primitive). Every consumer reads through the same resolver. forgegen, the
+"easy button," writes the auto-detected list once so the rest of the
+toolchain has something concrete to start from.
+
+**Chapter editing — split / merge / drag / exclude — and durable export
+into other containers — muxing into MP4 metadata, embedding into funscript
+metadata blocks, splitting per-chapter files — live in FunscriptForge and
+forgeassembler, never in forgegen.** Reasons:
+
+1. **forgegen is the easy button.** Its single user promise is *give me
+   a funscript with no fuss.* A chapter editor in the Generate panel
+   would mean every user has to confront chapter UI before they get a
+   funscript — that's the opposite of "easy button." If the auto-detected
+   chapters are wrong, the recourse isn't *edit them in forgegen* — it's
+   *open the file in FunscriptForge or forgeassembler to refine.* The
+   sidecar makes that recourse durable: edits persist, re-running
+   forgegen picks up the refined chapters.
+2. **FunscriptForge and forgeassembler are already in editing mode.**
+   Both apps have timeline UIs where chapter authoring belongs natively.
+   Putting editing + export there matches where the user already is.
+3. **User preferences for export are app-scoped.** A creator using
+   FunscriptForge to polish a hand-edited script has different export
+   preferences (embed in funscript? mux into MP4?) than a creator using
+   forgeassembler to slice a 5-hour source into clips (split per-chapter?
+   suggest cuts?). One global setting in forgegen would conflate these.
+
+The split:
+- **forgegen** — *easy button.* Auto-detect, save sidecar, generate. No
+  chapter UI beyond progress feedback during the long load.
+- **FunscriptForge** — *funscript editor.* Full chapter editing
+  (split / merge / drag / exclude) plus user-preference export to MP4
+  metadata or funscript metadata block.
+- **forgeassembler** — *clip assembler.* Full chapter editing plus
+  user-preference export — per-chapter file splits, muxing into output
+  MP4, etc.
+
+The `<stem>.chapters.json` sidecar carries the full chapter list always;
+"excluded" is a per-chapter flag (`include: false` or similar) that each
+consumer interprets in its own context. Reflecting exclusion in the data
+model rather than deletion lets the user un-exclude later, lets a
+different consumer make a different inclusion decision, and preserves the
+audio-structure analysis intact for future re-use.
 
 ---
 
@@ -129,9 +175,9 @@ These layers do *not* belong in v1. They are the design space the audio-structur
 
 Things that look like cost-saving deferrals but actually belong in v1:
 
-- **User-editable chapter boundaries.** Auto-detection will be wrong on some files. *Wrong chapters → bad output → no recourse* is the dead-end UX that makes a tool feel cheap. v1 surfaces proposed chapters in the consumer's UI (forgegen Generate panel, FunscriptForge editor) with affordances to drag boundaries, add cuts, delete cuts, and re-run. The primitive returns chapters that are easy to mutate; persistence to the sidecar makes overrides durable across sessions.
-- **Sidecar persistence is the default, not an optimization.** Auto-chapter results write to `<stem>.chapters.json` on first run. Subsequent consumers find chapters via the existing resolver order: embedded MP4 chapters → sidecar → re-run auto-chapter. User edits go to the sidecar, never lost.
-- **Per-chapter progress events** through the existing `progress_callback`. Long-form analysis without per-chapter visibility is the opaque-wait UX the structural primitive is supposed to fix; missing it would defeat the purpose.
+- **User-editable chapter boundaries — but in FunscriptForge and forgeassembler, not forgegen.** Auto-detection will be wrong on some files. *Wrong chapters → bad output → no recourse* is the dead-end UX that makes a tool feel cheap. The recourse here isn't a chapter editor in forgegen (which would compromise the easy-button promise); it's the chapter editor that ships as part of v1 in FunscriptForge and forgeassembler. The primitive returns chapters that are easy to mutate; the sidecar makes those edits durable across tools and sessions; re-running forgegen picks up the refined chapters automatically.
+- **Sidecar persistence is the default, not an optimization.** Auto-chapter results write to `<stem>.chapters.json` on first run. Subsequent consumers find chapters via the existing resolver order: embedded MP4 chapters → sidecar → re-run auto-chapter. User edits in FunscriptForge / forgeassembler go to the sidecar, never lost.
+- **Per-chapter progress events** through the existing `progress_callback`. Long-form analysis without per-chapter visibility is the opaque-wait UX the structural primitive is supposed to fix; missing it would defeat the purpose. This is the *only* chapter-aware UX in forgegen — feedback during the long load, not editing.
 
 ## Decisions held open until data is in
 
