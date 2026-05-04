@@ -55,6 +55,32 @@ This is why `videoflow.structural` belongs in videoflow, not in FunscriptForge: 
 
 ---
 
+## Two roles, one primitive — the "chapter" overload
+
+The word "chapter" carries two distinct meanings in the lqr toolchain, and
+they share boundaries but serve different ends. Calling out the
+distinction explicitly so the doc doesn't conflate them:
+
+| Role | Use case | Who cares about it | What the data needs |
+|---|---|---|---|
+| **Generation segmentation** | Bitesize chunks for per-segment analysis. Each chunk classifies modes, normalizes energy, and (later) biases by content type independently. The "theme" the user gets emerges from the audio's actual progression instead of a single whole-file averaging. | forgegen | `at_ms`, `end_ms`, `content_type` heuristic, `confidence`, `evidence` |
+| **Navigation waypoints** | Named, navigable sections. Find favorite parts. Cut points for assembly. Ruler-track overlay against funscript phrases. | forgeplayer, forgeassembler, FunscriptForge | `at_ms`, `end_ms`, `name`, `intent`, `include` flag |
+
+**The same `<stem>.chapters.json` carries both.** The boundaries are
+shared; the fields are additive. A chapter record produced by
+`auto_chapter()` has generation-flavored fields populated; downstream
+editors enrich it with navigation-flavored fields (names, intents,
+exclusion flags) over time. Forgegen ignores fields it doesn't care
+about; navigation consumers ignore the analysis fields.
+
+This is why we resist the pull to create two parallel data structures
+("analysis_segments.json" + "chapters.json"). They would drift over
+time, force consumers to merge, and lose the round-trip property where
+a user's edit in FunscriptForge informs forgegen's next regeneration.
+One primitive, additive fields, role-specific consumption.
+
+---
+
 ## The primitive: `videoflow.structural`
 
 ### `auto_chapter(media, target_minutes=5.5) -> list[Chapter]`
