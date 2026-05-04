@@ -8,6 +8,10 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from videoflow.chapters import Chapter
 
 _VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -183,6 +187,7 @@ def analyze_beats(
     tracker: str = "auto",
     locked_bpm: float | None = None,
     progress_callback=None,
+    chapters: list["Chapter"] | None = None,
 ) -> AudioBeatMap:
     """Analyse the beat structure of an audio or video file.
 
@@ -235,6 +240,18 @@ def analyze_beats(
                 when you know the tempo and want the tracker to stop
                 hunting (especially helpful for tracks where
                 auto-detection falls onto a half/double tempo octave).
+        chapters: Optional chapter list (typically from
+                :func:`videoflow.structural.auto_chapter`). When provided,
+                analysis runs per-chapter and results are stitched into a
+                single timeline — the key win is **per-chunk energy
+                normalization**, so quiet ambient sections aren't crushed
+                by a loud climax's RMS distribution. Each chapter also
+                gets its own tracker resolution (a 5-minute climax chunk
+                resolves ``tracker="auto"`` differently than a 5-minute
+                quiet intro). Beats / phrases / energy are concatenated
+                in chapter order; the reported ``bpm`` is the
+                duration-weighted mean of per-chapter BPMs. Pass ``None``
+                (default) for whole-file analysis.
 
     Returns:
         :class:`AudioBeatMap` with bpm, beats, downbeats, phrases, energy,
@@ -335,79 +352,22 @@ def analyze_beats(
         else:
             y_track = y
 
-        # Resolve "auto" → concrete tracker by track length.
-        resolved_tracker = tracker
-        if resolved_tracker == "auto":
-            resolved_tracker = (
-                "plp" if duration_ms > PLP_AUTO_DURATION_MS else "beat_track"
+        if chapters:
+            bpm, beats_ms, downbeats_ms, phrases, energy = _analyze_per_chapter(
+                y_track, sr_, duration_ms,
+                chapters=chapters,
+                tracker=tracker,
+                locked_bpm=locked_bpm,
+                progress=_progress,
             )
-
-        if resolved_tracker == "plp":
-            _progress("Detecting beats (PLP — long-form stable)…")
-            # PLP — predominant local pulse. Robust on long-form material
-            # where the global tempo drifts. Beats are local maxima of the
-            # pulse envelope.
-            plp_kwargs: dict = {"y": y_track, "sr": sr_}
-            if locked_bpm is not None:
-                # Narrow the tempo search around the lock so PLP stops
-                # hunting across tempo octaves.
-                plp_kwargs["tempo_min"] = max(1.0, locked_bpm - 2.0)
-                plp_kwargs["tempo_max"] = locked_bpm + 2.0
-            pulse = _librosa.beat.plp(**plp_kwargs)
-            beat_frames = _np.flatnonzero(_librosa.util.localmax(pulse))
-            beat_times = _librosa.frames_to_time(beat_frames, sr=sr_)
-
-            beats_ms = [round(float(t) * 1000) for t in beat_times]
-            if locked_bpm is not None:
-                bpm = float(locked_bpm)
-            elif len(beats_ms) >= 2:
-                # Median inter-beat interval → BPM.
-                deltas = [
-                    beats_ms[i + 1] - beats_ms[i]
-                    for i in range(len(beats_ms) - 1)
-                ]
-                deltas.sort()
-                median_delta = deltas[len(deltas) // 2]
-                bpm = 60_000.0 / median_delta if median_delta > 0 else 0.0
-            else:
-                bpm = 0.0
         else:
-            _progress("Detecting beats (beat_track)…")
-            # Classic beat_track — global-tempo dynamic programming.
-            bt_kwargs: dict = {"y": y_track, "sr": sr_}
-            if locked_bpm is not None:
-                bt_kwargs["start_bpm"] = float(locked_bpm)
-                bt_kwargs["tightness"] = 200  # lock harder to start_bpm
-            tempo, beat_frames = _librosa.beat.beat_track(**bt_kwargs)
-            beat_times = _librosa.frames_to_time(beat_frames, sr=sr_)
-
-            bpm = (
-                float(locked_bpm)
-                if locked_bpm is not None
-                else float(_np.atleast_1d(tempo)[0])
+            bpm, beats_ms, downbeats_ms, phrases, energy = _analyze_buffer(
+                y_track, sr_, duration_ms,
+                tracker=tracker,
+                locked_bpm=locked_bpm,
+                progress=_progress,
+                time_offset_ms=0,
             )
-            beats_ms = [round(float(t) * 1000) for t in beat_times]
-
-        _progress("Computing phrases + per-beat energy…")
-        # Downbeats: every 4th beat (assume 4/4 time, V1)
-        downbeats_ms = beats_ms[::4]
-
-        # Phrases: every 16 beats = 4 bars
-        phrases: list[tuple[int, int]] = []
-        for i in range(0, len(beats_ms), 16):
-            start = beats_ms[i]
-            end = beats_ms[min(i + 16, len(beats_ms) - 1)]
-            phrases.append((start, end))
-
-        # Per-beat energy: RMS of the tracked signal, normalised to 0.0–1.0.
-        # Using y_track keeps energy consistent with the beat source —
-        # percussive mode reports drum energy, not vocal energy.
-        rms = _librosa.feature.rms(y=y_track)[0]  # shape: (n_frames,)
-        energy_raw = [
-            float(rms[min(int(f), len(rms) - 1)]) for f in beat_frames
-        ]
-        max_e = max(energy_raw) if energy_raw else 1.0
-        energy = [e / max_e if max_e > 0 else 0.0 for e in energy_raw]
 
     except (BeatError, ValueError):
         raise
@@ -425,3 +385,154 @@ def analyze_beats(
         energy=energy,
         duration_ms=duration_ms,
     )
+
+
+# ---------------------------------------------------------------------------
+# Internal — per-buffer analysis core
+# ---------------------------------------------------------------------------
+
+def _analyze_buffer(
+    y_track,
+    sr: int,
+    duration_ms: int,
+    *,
+    tracker: str,
+    locked_bpm: float | None,
+    progress,
+    time_offset_ms: int,
+) -> tuple[float, list[int], list[int], list[tuple[int, int]], list[float]]:
+    """Run the beat / phrase / energy pipeline on one buffer.
+
+    Returns ``(bpm, beats_ms, downbeats_ms, phrases, energy)``. All
+    timestamps are shifted by ``time_offset_ms`` so the result can be
+    placed at any position in a longer timeline. Energy is normalised
+    *within this buffer only* — that's the per-chunk normalisation lever
+    that fixes ambient/hentai content from being crushed by a loud
+    climax's RMS distribution.
+    """
+    # Resolve "auto" → concrete tracker by buffer length.
+    resolved_tracker = tracker
+    if resolved_tracker == "auto":
+        resolved_tracker = (
+            "plp" if duration_ms > PLP_AUTO_DURATION_MS else "beat_track"
+        )
+
+    if resolved_tracker == "plp":
+        progress("Detecting beats (PLP — long-form stable)…")
+        plp_kwargs: dict = {"y": y_track, "sr": sr}
+        if locked_bpm is not None:
+            plp_kwargs["tempo_min"] = max(1.0, locked_bpm - 2.0)
+            plp_kwargs["tempo_max"] = locked_bpm + 2.0
+        pulse = _librosa.beat.plp(**plp_kwargs)
+        beat_frames = _np.flatnonzero(_librosa.util.localmax(pulse))
+        beat_times = _librosa.frames_to_time(beat_frames, sr=sr)
+
+        beats_ms = [round(float(t) * 1000) + time_offset_ms for t in beat_times]
+        if locked_bpm is not None:
+            bpm = float(locked_bpm)
+        elif len(beats_ms) >= 2:
+            deltas = sorted(
+                beats_ms[i + 1] - beats_ms[i]
+                for i in range(len(beats_ms) - 1)
+            )
+            median_delta = deltas[len(deltas) // 2]
+            bpm = 60_000.0 / median_delta if median_delta > 0 else 0.0
+        else:
+            bpm = 0.0
+    else:
+        progress("Detecting beats (beat_track)…")
+        bt_kwargs: dict = {"y": y_track, "sr": sr}
+        if locked_bpm is not None:
+            bt_kwargs["start_bpm"] = float(locked_bpm)
+            bt_kwargs["tightness"] = 200
+        tempo, beat_frames = _librosa.beat.beat_track(**bt_kwargs)
+        beat_times = _librosa.frames_to_time(beat_frames, sr=sr)
+
+        bpm = (
+            float(locked_bpm)
+            if locked_bpm is not None
+            else float(_np.atleast_1d(tempo)[0])
+        )
+        beats_ms = [round(float(t) * 1000) + time_offset_ms for t in beat_times]
+
+    progress("Computing phrases + per-beat energy…")
+    downbeats_ms = beats_ms[::4]
+
+    phrases: list[tuple[int, int]] = []
+    for i in range(0, len(beats_ms), 16):
+        start = beats_ms[i]
+        end = beats_ms[min(i + 16, len(beats_ms) - 1)]
+        phrases.append((start, end))
+
+    rms = _librosa.feature.rms(y=y_track)[0]
+    energy_raw = [
+        float(rms[min(int(f), len(rms) - 1)]) for f in beat_frames
+    ]
+    max_e = max(energy_raw) if energy_raw else 1.0
+    energy = [e / max_e if max_e > 0 else 0.0 for e in energy_raw]
+
+    return bpm, beats_ms, downbeats_ms, phrases, energy
+
+
+def _analyze_per_chapter(
+    y_track,
+    sr: int,
+    duration_ms: int,
+    *,
+    chapters: list["Chapter"],
+    tracker: str,
+    locked_bpm: float | None,
+    progress,
+) -> tuple[float, list[int], list[int], list[tuple[int, int]], list[float]]:
+    """Run :func:`_analyze_buffer` per chapter and stitch the results.
+
+    Each chapter is analysed in isolation — beat tracking, phrase
+    grouping, AND energy normalisation all happen against the chunk's
+    own audio. Then beats / downbeats / phrases / energies are
+    concatenated in chapter order; the reported BPM is the
+    duration-weighted mean of per-chapter BPMs.
+    """
+    if not chapters:
+        return _analyze_buffer(
+            y_track, sr, duration_ms,
+            tracker=tracker, locked_bpm=locked_bpm,
+            progress=progress, time_offset_ms=0,
+        )
+
+    all_beats: list[int] = []
+    all_downbeats: list[int] = []
+    all_phrases: list[tuple[int, int]] = []
+    all_energy: list[float] = []
+    weighted_bpm = 0.0
+    total_weight = 0
+
+    for i, ch in enumerate(chapters):
+        end_ms = ch.end_ms if ch.end_ms is not None else duration_ms
+        chunk_duration_ms = max(0, end_ms - ch.at_ms)
+        if chunk_duration_ms < 1000:
+            continue  # skip sub-second chunks — beat tracker can't say much
+
+        progress(
+            f"Analyzing chapter {i + 1}/{len(chapters)} "
+            f"({ch.at_ms // 1000}s-{end_ms // 1000}s)…"
+        )
+        start_sample = max(0, int(round(ch.at_ms / 1000.0 * sr)))
+        end_sample = min(len(y_track), int(round(end_ms / 1000.0 * sr)))
+        y_chunk = y_track[start_sample:end_sample]
+        if len(y_chunk) < sr:
+            continue
+
+        chunk_bpm, chunk_beats, chunk_db, chunk_phrases, chunk_energy = _analyze_buffer(
+            y_chunk, sr, chunk_duration_ms,
+            tracker=tracker, locked_bpm=locked_bpm,
+            progress=progress, time_offset_ms=ch.at_ms,
+        )
+        all_beats.extend(chunk_beats)
+        all_downbeats.extend(chunk_db)
+        all_phrases.extend(chunk_phrases)
+        all_energy.extend(chunk_energy)
+        weighted_bpm += chunk_bpm * chunk_duration_ms
+        total_weight += chunk_duration_ms
+
+    bpm = weighted_bpm / total_weight if total_weight > 0 else 0.0
+    return bpm, all_beats, all_downbeats, all_phrases, all_energy

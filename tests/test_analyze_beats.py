@@ -562,5 +562,155 @@ class TestAnalyzeBeats(unittest.TestCase):
         self.assertAlmostEqual(result.bpm, 140.0, places=3)
 
 
+class TestAnalyzeBeatsWithChapters(unittest.TestCase):
+    """Chapter-aware analyze_beats — per-chunk analysis + stitched output.
+
+    Uses real synthetic audio rather than mocking, since the chapter path
+    slices the buffer and runs librosa on each slice — mocking those calls
+    would obscure whether the slicing/stitching actually does the right
+    thing.
+    """
+
+    @staticmethod
+    def _click_audio(duration_s: float, bpm: float, sr: int = 22050):
+        """Sharp impulses at *bpm* — a clean signal for beat-tracker tests."""
+        import numpy as np
+        y = np.zeros(int(duration_s * sr), dtype=np.float32)
+        interval = int(sr * 60.0 / bpm)
+        for i in range(0, len(y), interval):
+            burst = min(int(sr * 0.005), len(y) - i)
+            y[i:i + burst] = np.linspace(1.0, 0.0, burst)
+        return y
+
+    def _write_wav(self, path, y, sr=22050):
+        import soundfile as sf
+        sf.write(str(path), y, sr, subtype="FLOAT")
+        return path
+
+    def test_chapters_path_returns_stitched_timeline(self):
+        """beats / phrases / energy concat in chapter order; timestamps ascending."""
+        from tempfile import TemporaryDirectory
+        from videoflow.audio import analyze_beats
+        from videoflow.chapters import Chapter
+
+        with TemporaryDirectory() as td:
+            path = self._write_wav(
+                Path(td) / "click.wav", self._click_audio(60.0, 120.0),
+            )
+            chapters = [
+                Chapter(at_ms=0, end_ms=30_000),
+                Chapter(at_ms=30_000, end_ms=60_000),
+            ]
+            result = analyze_beats(path, chapters=chapters)
+
+        self.assertGreater(len(result.beats), 0)
+        self.assertEqual(result.beats, sorted(result.beats))
+        # Each chapter spans 30s — beats should land in both halves
+        first_half = [b for b in result.beats if b < 30_000]
+        second_half = [b for b in result.beats if b >= 30_000]
+        self.assertGreater(len(first_half), 5)
+        self.assertGreater(len(second_half), 5)
+
+    def test_chapters_path_per_chunk_energy_normalization(self):
+        """Each chunk's max energy = 1.0 — the key fix for ambient-vs-music drift."""
+        from tempfile import TemporaryDirectory
+        from videoflow.audio import analyze_beats
+        from videoflow.chapters import Chapter
+
+        with TemporaryDirectory() as td:
+            # Quiet first half (amp 0.05) + loud second half (amp 0.6)
+            quiet = self._click_audio(30.0, 120.0) * 0.05
+            loud = self._click_audio(30.0, 120.0) * 0.6
+            import numpy as np
+            y = np.concatenate([quiet, loud])
+            path = self._write_wav(Path(td) / "mixed.wav", y)
+            chapters = [
+                Chapter(at_ms=0, end_ms=30_000),
+                Chapter(at_ms=30_000, end_ms=60_000),
+            ]
+            result = analyze_beats(path, chapters=chapters)
+
+        first_energies = [
+            e for b, e in zip(result.beats, result.energy) if b < 30_000
+        ]
+        second_energies = [
+            e for b, e in zip(result.beats, result.energy) if b >= 30_000
+        ]
+        # Both chunks should have a beat that hits 1.0 in their normalized energy.
+        # Without per-chunk normalization, the quiet half would peak ~0.08.
+        self.assertGreater(max(first_energies), 0.95,
+                           "first chunk should self-normalize to 1.0")
+        self.assertGreater(max(second_energies), 0.95,
+                           "second chunk should self-normalize to 1.0")
+
+    def test_chapters_none_matches_default_path(self):
+        """Passing chapters=None is equivalent to the existing whole-file path."""
+        from tempfile import TemporaryDirectory
+        from videoflow.audio import analyze_beats
+
+        with TemporaryDirectory() as td:
+            path = self._write_wav(
+                Path(td) / "click.wav", self._click_audio(20.0, 120.0),
+            )
+            a = analyze_beats(path)
+            b = analyze_beats(path, chapters=None)
+        self.assertEqual(a.beats, b.beats)
+        self.assertEqual(a.energy, b.energy)
+        self.assertEqual(a.duration_ms, b.duration_ms)
+
+    def test_chapters_progress_callback_per_chunk(self):
+        """progress_callback fires a per-chunk label like 'Analyzing chapter X/Y…'."""
+        from tempfile import TemporaryDirectory
+        from videoflow.audio import analyze_beats
+        from videoflow.chapters import Chapter
+
+        labels: list[str] = []
+        with TemporaryDirectory() as td:
+            path = self._write_wav(
+                Path(td) / "click.wav", self._click_audio(40.0, 120.0),
+            )
+            chapters = [
+                Chapter(at_ms=0, end_ms=20_000),
+                Chapter(at_ms=20_000, end_ms=40_000),
+            ]
+            analyze_beats(path, chapters=chapters, progress_callback=labels.append)
+
+        chunk_labels = [lb for lb in labels if "chapter" in lb.lower()]
+        self.assertEqual(len(chunk_labels), 2)
+        self.assertIn("1/2", chunk_labels[0])
+        self.assertIn("2/2", chunk_labels[1])
+
+    def test_empty_chapters_falls_back_to_whole_file(self):
+        """Empty list is treated as 'no chapters' — whole-file analysis runs."""
+        from tempfile import TemporaryDirectory
+        from videoflow.audio import analyze_beats
+
+        with TemporaryDirectory() as td:
+            path = self._write_wav(
+                Path(td) / "click.wav", self._click_audio(15.0, 120.0),
+            )
+            result = analyze_beats(path, chapters=[])
+        self.assertGreater(len(result.beats), 0)
+
+    def test_sub_second_chunk_skipped(self):
+        """A chapter under 1 second is skipped (beat tracker can't say much)."""
+        from tempfile import TemporaryDirectory
+        from videoflow.audio import analyze_beats
+        from videoflow.chapters import Chapter
+
+        with TemporaryDirectory() as td:
+            path = self._write_wav(
+                Path(td) / "click.wav", self._click_audio(20.0, 120.0),
+            )
+            # First chapter is sub-second, should be skipped silently
+            chapters = [
+                Chapter(at_ms=0, end_ms=500),
+                Chapter(at_ms=500, end_ms=20_000),
+            ]
+            result = analyze_beats(path, chapters=chapters)
+        # All beats should land in the second chunk (>= 500ms)
+        self.assertTrue(all(b >= 500 for b in result.beats))
+
+
 if __name__ == "__main__":
     unittest.main()
