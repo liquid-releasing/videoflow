@@ -88,9 +88,16 @@ One primitive, additive fields, role-specific consumption.
 Synthesize a chapter list from the media's audio (or video, when present and useful). Return `Chapter` objects compatible with the existing `videoflow.chapters` resolver — the same downstream code consumes either source.
 
 **Audio path** (the v1 driver):
-- Silence detection finds candidate breakpoints.
-- `librosa.segment.recurrence_matrix` clusters self-similar regions.
-- Coalesce adjacent similar segments until each chapter reaches the target duration. Never split a recurring segment in half.
+
+Four stages, each addressing a specific failure mode of the previous:
+
+1. **Silence detection.** Find windows of low audio energy ≥ N seconds long — natural pauses between sections, songs, scenes, or dialogue and action transitions. These become *candidate boundary anchors*. Real content tends to pause naturally between content units, and humans expect chapter breaks to land in those pauses.
+
+2. **MFCC agglomerative clustering.** Mel-frequency cepstral coefficients capture the *spectral character* of audio — music, dialogue, foley, and silence sit in clearly separable MFCC regions. Compute MFCC vectors over short windows (`librosa.feature.mfcc(y, sr, n_mfcc=13)`), then run `librosa.segment.agglomerative` over the MFCC matrix. Raw chapter boundaries fall at the frame indices where consecutive MFCC frames belong to different clusters — i.e., where the audio's *timbre* changes meaningfully.
+
+3. **Silence-snap.** Push each raw cluster boundary to the nearest silence anchor from step 1. Without this step, boundaries can land mid-word, mid-beat, or mid-phrase. Silence-snap aligns chapter starts and ends with the natural pauses a human listener already perceives as breaks.
+
+4. **Micro-chapter merge.** If two consecutive chapters are closer than ~N seconds, merge them. Cleans up cluster jitter where MFCC briefly switches and switches back (e.g., a brief sound effect in a dialogue scene, a pickup beat at the end of a song). Also enforces the `target_minutes` floor — the algorithm coalesces adjacent similar segments until each chapter reaches the target duration. Never splits a recurring segment in half.
 
 **Video path** (deferred to v2; not blocking forgegen):
 - `videoflow.analysis.detect_scenes` (PySceneDetect) emits frame-accurate scene cuts.
