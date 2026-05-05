@@ -184,6 +184,14 @@ audio-structure analysis intact for future re-use.
 
 ---
 
+## Reusable patterns: sidecar fragments
+
+A chunk of a chapter sidecar — a single chapter with its phrases, or a multi-chapter sequence, or a phrase-only pattern — can be bottled, named, and applied to other media. This is how cookbook recipes, the DPL phrase library, user-saved title sequences, and forgegen's recipe-per-chapter selection all unify into one primitive.
+
+See [sidecar-fragment.md](sidecar-fragment.md) for the schema, CLI surface, library/catalog architecture, and authorship matrix across the four products.
+
+---
+
 ## Cross-signal opportunities (future)
 
 Once both audio and funscript structural analyses are stable on their own, layered combinations become possible.
