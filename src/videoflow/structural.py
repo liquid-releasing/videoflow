@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Callable
 
 from videoflow.chapters import Chapter
+from videoflow.progress import OnProgress, ProgressReporter
 
 _VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -90,6 +91,7 @@ def auto_chapter(
     *,
     target_minutes: float = DEFAULT_TARGET_MINUTES,
     progress_callback: Callable[[str], None] | None = None,
+    on_progress: OnProgress | None = None,
     write_sidecar: bool = True,
     force: bool = False,
     sr: int = 22050,
@@ -149,38 +151,67 @@ def auto_chapter(
             'Install it with: pip install "videoflow[audio]"'
         )
 
+    reporter = ProgressReporter(on_progress)
+
     def _progress(label: str) -> None:
         if progress_callback is not None:
             try:
                 progress_callback(label)
             except Exception:
                 pass
+        reporter.message(label)
 
-    audio_path, _tmp = _prepare_audio(media_path, sr=sr, progress=_progress)
-    try:
-        _progress("Loading audio (librosa)…")
-        y, sr_ = _librosa.load(audio_path, sr=sr, mono=True)
-        duration_ms = int(round(_librosa.get_duration(y=y, sr=sr_) * 1000))
-
-        if duration_ms < int(_MIN_CHUNK_DURATION_MIN * 60_000):
-            _progress("Track too short to chunk — returning single chapter")
-            chapters = [
-                _whole_file_chapter(y, sr_, duration_ms),
-            ]
-        else:
-            chapters = _detect_chapters(
-                y, sr_, duration_ms,
-                target_minutes=target_minutes,
-                progress=_progress,
+    with reporter.stage("structural.auto_chapter"):
+        with reporter.stage("extract"):
+            audio_path, _tmp = _prepare_audio(media_path, sr=sr, progress=_progress)
+            reporter.complete(
+                summary="audio extracted to wav" if _tmp else "no extraction needed",
             )
-    finally:
-        if _tmp is not None:
-            Path(_tmp).unlink(missing_ok=True)
+        try:
+            with reporter.stage("load"):
+                _progress("Loading audio (librosa)…")
+                y, sr_ = _librosa.load(audio_path, sr=sr, mono=True)
+                duration_ms = int(round(_librosa.get_duration(y=y, sr=sr_) * 1000))
+                reporter.complete(
+                    summary=f"{duration_ms / 1000:.1f}s @ {sr_} Hz mono",
+                )
 
-    if write_sidecar:
-        _maybe_write_sidecar(
-            media_path, chapters, target_minutes=target_minutes, force=force,
-        )
+            if duration_ms < int(_MIN_CHUNK_DURATION_MIN * 60_000):
+                with reporter.stage("whole_file"):
+                    _progress("Track too short to chunk — returning single chapter")
+                    chapters = [
+                        _whole_file_chapter(y, sr_, duration_ms),
+                    ]
+                    reporter.complete(summary="1 chapter (whole file)")
+            else:
+                with reporter.stage("detect"):
+                    chapters = _detect_chapters(
+                        y, sr_, duration_ms,
+                        target_minutes=target_minutes,
+                        progress=_progress,
+                    )
+                    reporter.complete(
+                        summary=f"{len(chapters)} chapters detected",
+                    )
+        finally:
+            if _tmp is not None:
+                Path(_tmp).unlink(missing_ok=True)
+
+        if write_sidecar:
+            with reporter.stage("sidecar"):
+                wrote = _maybe_write_sidecar(
+                    media_path, chapters,
+                    target_minutes=target_minutes, force=force,
+                )
+                reporter.complete(
+                    summary=(
+                        f"sidecar written: {len(chapters)} chapters"
+                        if wrote else
+                        "sidecar exists — preserved"
+                    ),
+                )
+
+        reporter.complete(summary=f"{len(chapters)} chapters")
 
     return chapters
 

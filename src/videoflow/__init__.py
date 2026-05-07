@@ -22,6 +22,13 @@ from videoflow.generate import (
     generate_from_beats,
     shape_curve,
 )
+from videoflow.progress import (
+    ETAEstimator,
+    OnProgress,
+    ProgressReporter,
+    StageEvent,
+    adapt_string_callback,
+)
 from videoflow.structural import AutoChapterError, auto_chapter
 
 __all__ = [
@@ -44,4 +51,9 @@ __all__ = [
     "export_funscript",
     "generate_from_beats",
     "shape_curve",
+    "ETAEstimator",
+    "OnProgress",
+    "ProgressReporter",
+    "StageEvent",
+    "adapt_string_callback",
 ]

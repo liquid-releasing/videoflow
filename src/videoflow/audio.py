@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import subprocess
@@ -9,6 +10,10 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from videoflow.progress import OnProgress, ProgressReporter
+
+_nullcontext = contextlib.nullcontext
 
 if TYPE_CHECKING:
     from videoflow.chapters import Chapter
@@ -187,6 +192,7 @@ def analyze_beats(
     tracker: str = "auto",
     locked_bpm: float | None = None,
     progress_callback=None,
+    on_progress: OnProgress | None = None,
     chapters: list["Chapter"] | None = None,
 ) -> AudioBeatMap:
     """Analyse the beat structure of an audio or video file.
@@ -252,6 +258,16 @@ def analyze_beats(
                 in chapter order; the reported ``bpm`` is the
                 duration-weighted mean of per-chapter BPMs. Pass ``None``
                 (default) for whole-file analysis.
+        progress_callback: **Deprecated** legacy progress hook —
+                ``Callable[[str], None]`` invoked with stage labels.
+                Errors are swallowed. Prefer ``on_progress`` for new
+                callers; both are honoured during transition.
+        on_progress: Modern progress hook —
+                :data:`videoflow.progress.OnProgress` callback that
+                receives :class:`~videoflow.progress.StageEvent` records
+                (start / progress / complete) so UIs can render a tree
+                of work, ETAs, and per-stage summaries. Errors in the
+                callback are swallowed.
 
     Returns:
         :class:`AudioBeatMap` with bpm, beats, downbeats, phrases, energy,
@@ -275,15 +291,21 @@ def analyze_beats(
             f"locked_bpm must be positive, got {locked_bpm!r}"
         )
 
+    reporter = ProgressReporter(on_progress)
+
     def _progress(label: str) -> None:
         # Thin shim so callers don't have to null-check. We swallow any
         # exception in the callback — UI feedback should never break
-        # analysis. Each label marks the START of a new stage.
+        # analysis. Each label marks the START of a new stage; the
+        # reporter forwards it as an informational message inside the
+        # currently-open stage so the modern on_progress consumer also
+        # sees it.
         if progress_callback is not None:
             try:
                 progress_callback(label)
             except Exception:
                 pass
+        reporter.message(label)
 
     input = Path(input)
     if not input.exists():
@@ -295,87 +317,115 @@ def analyze_beats(
             'Install it with: pip install "videoflow[audio]"'
         )
 
-    # For video files, extract audio to a temp WAV via FFmpeg first.
-    _tmp_audio = None
-    if input.suffix.lower() in _VIDEO_SUFFIXES:
-        _progress("Extracting audio from video (ffmpeg)…")
-        # Look for ffmpeg on PATH, then alongside this file, then alongside the input file.
-        _ffmpeg = "ffmpeg"
-        for _candidate in [
-            Path(__file__).parent / "ffmpeg.exe",
-            Path(__file__).parent / "ffmpeg",
-            input.parent / "ffmpeg.exe",
-            input.parent / "ffmpeg",
-        ]:
-            if _candidate.is_file():
-                _ffmpeg = str(_candidate)
-                break
+    with reporter.stage("audio.analyze"):
+        # For video files, extract audio to a temp WAV via FFmpeg first.
+        _tmp_audio = None
+        if input.suffix.lower() in _VIDEO_SUFFIXES:
+            with reporter.stage("extract"):
+                _progress("Extracting audio from video (ffmpeg)…")
+                # Look for ffmpeg on PATH, then alongside this file, then alongside the input file.
+                _ffmpeg = "ffmpeg"
+                for _candidate in [
+                    Path(__file__).parent / "ffmpeg.exe",
+                    Path(__file__).parent / "ffmpeg",
+                    input.parent / "ffmpeg.exe",
+                    input.parent / "ffmpeg",
+                ]:
+                    if _candidate.is_file():
+                        _ffmpeg = str(_candidate)
+                        break
 
-        _tmp_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        _tmp_audio.close()
+                _tmp_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                _tmp_audio.close()
+                try:
+                    subprocess.run(
+                        [
+                            _ffmpeg, "-y", "-i", str(input),
+                            "-vn", "-ar", str(sr), "-ac", "1",
+                            "-f", "wav", _tmp_audio.name,
+                        ],
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=_NO_WINDOW,
+                    )
+                except FileNotFoundError:
+                    Path(_tmp_audio.name).unlink(missing_ok=True)
+                    raise BeatError(
+                        "FFmpeg is required to extract audio from video files. "
+                        "Install it from https://ffmpeg.org/download.html — "
+                        "or place ffmpeg.exe in the forgegen folder."
+                    )
+                except subprocess.CalledProcessError as exc:
+                    Path(_tmp_audio.name).unlink(missing_ok=True)
+                    raise BeatError(f"FFmpeg audio extraction failed: {exc}") from exc
+                load_path = _tmp_audio.name
+                reporter.complete(summary="audio extracted to wav")
+        else:
+            load_path = str(input)
+
         try:
-            subprocess.run(
-                [
-                    _ffmpeg, "-y", "-i", str(input),
-                    "-vn", "-ar", str(sr), "-ac", "1",
-                    "-f", "wav", _tmp_audio.name,
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=_NO_WINDOW,
-            )
-        except FileNotFoundError:
-            Path(_tmp_audio.name).unlink(missing_ok=True)
-            raise BeatError(
-                "FFmpeg is required to extract audio from video files. "
-                "Install it from https://ffmpeg.org/download.html — "
-                "or place ffmpeg.exe in the forgegen folder."
-            )
-        except subprocess.CalledProcessError as exc:
-            Path(_tmp_audio.name).unlink(missing_ok=True)
-            raise BeatError(f"FFmpeg audio extraction failed: {exc}") from exc
-        load_path = _tmp_audio.name
-    else:
-        load_path = str(input)
+            with reporter.stage("load"):
+                _progress("Loading audio (librosa)…")
+                y, sr_ = _librosa.load(load_path, sr=sr, mono=True)
+                duration_ms = round(_librosa.get_duration(y=y, sr=sr_) * 1000)
+                reporter.complete(
+                    summary=f"{duration_ms / 1000:.1f}s @ {sr_} Hz mono",
+                )
 
-    try:
-        _progress("Loading audio (librosa)…")
-        y, sr_ = _librosa.load(load_path, sr=sr, mono=True)
-        duration_ms = round(_librosa.get_duration(y=y, sr=sr_) * 1000)
+            # Select the signal used for beat tracking and energy.
+            # HPSS separates harmonic (voice, melody) from percussive (drums).
+            if source == "percussive":
+                with reporter.stage("hpss"):
+                    _progress("Separating percussive component (HPSS)…")
+                    _, y_track = _librosa.effects.hpss(y)
+                    reporter.complete(summary="percussive component isolated")
+            else:
+                y_track = y
 
-        # Select the signal used for beat tracking and energy.
-        # HPSS separates harmonic (voice, melody) from percussive (drums).
-        if source == "percussive":
-            _progress("Separating percussive component (HPSS)…")
-            _, y_track = _librosa.effects.hpss(y)
-        else:
-            y_track = y
+            if chapters:
+                with reporter.stage("chapters"):
+                    bpm, beats_ms, downbeats_ms, phrases, energy = _analyze_per_chapter(
+                        y_track, sr_, duration_ms,
+                        chapters=chapters,
+                        tracker=tracker,
+                        locked_bpm=locked_bpm,
+                        progress=_progress,
+                        reporter=reporter,
+                    )
+                    reporter.complete(
+                        summary=(
+                            f"{len(chapters)} chapters · "
+                            f"BPM {bpm:.0f} · {len(beats_ms)} beats"
+                        ),
+                    )
+            else:
+                with reporter.stage("track"):
+                    bpm, beats_ms, downbeats_ms, phrases, energy = _analyze_buffer(
+                        y_track, sr_, duration_ms,
+                        tracker=tracker,
+                        locked_bpm=locked_bpm,
+                        progress=_progress,
+                        time_offset_ms=0,
+                    )
+                    reporter.complete(
+                        summary=f"BPM {bpm:.0f} · {len(beats_ms)} beats",
+                    )
 
-        if chapters:
-            bpm, beats_ms, downbeats_ms, phrases, energy = _analyze_per_chapter(
-                y_track, sr_, duration_ms,
-                chapters=chapters,
-                tracker=tracker,
-                locked_bpm=locked_bpm,
-                progress=_progress,
-            )
-        else:
-            bpm, beats_ms, downbeats_ms, phrases, energy = _analyze_buffer(
-                y_track, sr_, duration_ms,
-                tracker=tracker,
-                locked_bpm=locked_bpm,
-                progress=_progress,
-                time_offset_ms=0,
-            )
+        except (BeatError, ValueError):
+            raise
+        except Exception as exc:
+            raise BeatError(f"Beat analysis failed: {exc}") from exc
+        finally:
+            if _tmp_audio is not None:
+                Path(_tmp_audio.name).unlink(missing_ok=True)
 
-    except (BeatError, ValueError):
-        raise
-    except Exception as exc:
-        raise BeatError(f"Beat analysis failed: {exc}") from exc
-    finally:
-        if _tmp_audio is not None:
-            Path(_tmp_audio.name).unlink(missing_ok=True)
+        reporter.complete(
+            summary=(
+                f"BPM {bpm:.0f} · {len(beats_ms)} beats · "
+                f"{len(phrases)} phrases"
+            ),
+        )
 
     return AudioBeatMap(
         bpm=bpm,
@@ -483,6 +533,7 @@ def _analyze_per_chapter(
     tracker: str,
     locked_bpm: float | None,
     progress,
+    reporter: ProgressReporter | None = None,
 ) -> tuple[float, list[int], list[int], list[tuple[int, int]], list[float]]:
     """Run :func:`_analyze_buffer` per chapter and stitch the results.
 
@@ -491,6 +542,9 @@ def _analyze_per_chapter(
     own audio. Then beats / downbeats / phrases / energies are
     concatenated in chapter order; the reported BPM is the
     duration-weighted mean of per-chapter BPMs.
+
+    If a *reporter* is supplied, each chapter opens its own nested
+    sub-stage so UIs can render the per-chapter progress as a tree.
     """
     if not chapters:
         return _analyze_buffer(
@@ -516,17 +570,30 @@ def _analyze_per_chapter(
             f"Analyzing chapter {i + 1}/{len(chapters)} "
             f"({ch.at_ms // 1000}s-{end_ms // 1000}s)…"
         )
+
+        chapter_label = f"chapter {i + 1}/{len(chapters)}"
+        chapter_ctx = (
+            reporter.stage(chapter_label) if reporter is not None else _nullcontext()
+        )
+
         start_sample = max(0, int(round(ch.at_ms / 1000.0 * sr)))
         end_sample = min(len(y_track), int(round(end_ms / 1000.0 * sr)))
         y_chunk = y_track[start_sample:end_sample]
         if len(y_chunk) < sr:
             continue
 
-        chunk_bpm, chunk_beats, chunk_db, chunk_phrases, chunk_energy = _analyze_buffer(
-            y_chunk, sr, chunk_duration_ms,
-            tracker=tracker, locked_bpm=locked_bpm,
-            progress=progress, time_offset_ms=ch.at_ms,
-        )
+        with chapter_ctx:
+            chunk_bpm, chunk_beats, chunk_db, chunk_phrases, chunk_energy = _analyze_buffer(
+                y_chunk, sr, chunk_duration_ms,
+                tracker=tracker, locked_bpm=locked_bpm,
+                progress=progress, time_offset_ms=ch.at_ms,
+            )
+            if reporter is not None:
+                reporter.complete(
+                    summary=(
+                        f"BPM {chunk_bpm:.0f} · {len(chunk_beats)} beats"
+                    ),
+                )
         all_beats.extend(chunk_beats)
         all_downbeats.extend(chunk_db)
         all_phrases.extend(chunk_phrases)

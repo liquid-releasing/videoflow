@@ -708,6 +708,7 @@ def generate_from_beats(
     energy_normalize: bool = False,
     stroke_density: object = "half",
     title: str = "",
+    on_progress: "OnProgress | None" = None,
 ) -> Path:
     """Full pipeline: :class:`~videoflow.audio.AudioBeatMap` → ``.funscript``.
 
@@ -724,6 +725,10 @@ def generate_from_beats(
             troughs below ``center``, both energy-scaled). See
             :func:`beats_to_curve` for details. Default ``None``.
         title: Optional title stored in the file metadata.
+        on_progress: Optional :data:`videoflow.progress.OnProgress`
+            callback. Receives :class:`~videoflow.progress.StageEvent`
+            records (start / progress / complete) for each of the four
+            pipeline stages so UIs can render a progress tree.
 
     Returns:
         Path to the written ``.funscript`` file.
@@ -733,19 +738,39 @@ def generate_from_beats(
         beat_map = analyze_beats("track.mp3", source="percussive")
         path = generate_from_beats(beat_map, "track.funscript", center=50)
     """
-    curve = beats_to_curve(
-        beat_map,
-        low=low, high=high, center=center,
-        center_trajectory=center_trajectory,
-        tone_per_phrase=tone_per_phrase,
-        energy_normalize=energy_normalize,
-        stroke_density=stroke_density,
-    )
-    modes = classify_modes(beat_map)
-    shaped = shape_curve(
-        curve, modes,
-        low=low, center=center,
-        center_trajectory=center_trajectory,
-        tone_per_phrase=tone_per_phrase,
-    )
-    return export_funscript(shaped, output, title=title)
+    from videoflow.progress import ProgressReporter
+
+    reporter = ProgressReporter(on_progress)
+    with reporter.stage("generate"):
+        with reporter.stage("curve"):
+            curve = beats_to_curve(
+                beat_map,
+                low=low, high=high, center=center,
+                center_trajectory=center_trajectory,
+                tone_per_phrase=tone_per_phrase,
+                energy_normalize=energy_normalize,
+                stroke_density=stroke_density,
+            )
+            reporter.complete(summary=f"{len(curve)} curve points")
+
+        with reporter.stage("classify"):
+            modes = classify_modes(beat_map)
+            reporter.complete(summary=f"{len(modes)} mode segments")
+
+        with reporter.stage("shape"):
+            shaped = shape_curve(
+                curve, modes,
+                low=low, center=center,
+                center_trajectory=center_trajectory,
+                tone_per_phrase=tone_per_phrase,
+            )
+            reporter.complete(summary=f"{len(shaped)} actions shaped")
+
+        with reporter.stage("export"):
+            path = export_funscript(shaped, output, title=title)
+            reporter.complete(summary=f"wrote {path.name}")
+
+        reporter.complete(
+            summary=f"{len(shaped)} actions → {Path(output).name}",
+        )
+    return path

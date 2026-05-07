@@ -272,113 +272,29 @@ def cmd_generate_funscript(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# render — execute a canvas.json edit file
+# render / concat — placeholder commands. The implementations referenced
+# `videoflow.layout` and `videoflow.reel` modules that never landed; the
+# subcommands stay registered (so `--help` still mentions them) but
+# resolve to a clear "not implemented" error instead of import-time crashes.
+# Track the work in BACKLOG.md when these come back.
 # ---------------------------------------------------------------------------
 
 def cmd_render(args: argparse.Namespace) -> int:
-    from videoflow.layout import LayoutError, MultiPanelCanvas
+    _err(
+        "videoflow render is not implemented in this build "
+        "(canvas / multi-panel layout module not yet landed).",
+        args.human,
+    )
+    return 2
 
-    try:
-        canvas = MultiPanelCanvas.load(args.edit)
-    except FileNotFoundError as exc:
-        _err(str(exc), args.human)
-        return 1
-    except LayoutError as exc:
-        _err(str(exc), args.human)
-        return 1
-
-    output = args.output or canvas.to_dict().get("output")
-    if not output:
-        _err("output path required — set 'output' in the JSON or pass --output", args.human)
-        return 1
-
-    try:
-        result = canvas.render(
-            output,
-            crf=args.crf,
-            preset=args.preset,
-        )
-    except (FileNotFoundError, LayoutError) as exc:
-        _err(str(exc), args.human)
-        return 1
-
-    data = {"output": str(result), "edit": str(args.edit)}
-    if args.human:
-        print(f"rendered: {result}")
-    else:
-        print(json.dumps(data, indent=2))
-
-    return 0
-
-
-# ---------------------------------------------------------------------------
-# concat — assemble clips with gaps and chapter markers
-# ---------------------------------------------------------------------------
 
 def cmd_concat(args: argparse.Namespace) -> int:
-    from videoflow.reel import Reel, ReelError
-
-    try:
-        if args.from_folder is not None:
-            if not args.output:
-                _err(
-                    "--output is required when using --from-folder",
-                    args.human,
-                )
-                return 1
-            try:
-                w, h = (int(x) for x in args.canvas.split("x"))
-            except ValueError:
-                _err(f"invalid --canvas value {args.canvas!r}, use WxH (e.g. 1920x1080)", args.human)
-                return 1
-            reel = Reel.from_folder(
-                args.from_folder,
-                pattern=args.pattern,
-                sort=args.sort,
-                gap_ms=args.gap,
-                canvas_size=(w, h),
-            )
-            output = args.output
-        else:
-            try:
-                reel = Reel.load(args.reel)
-            except FileNotFoundError as exc:
-                _err(str(exc), args.human)
-                return 1
-            except ReelError as exc:
-                _err(str(exc), args.human)
-                return 1
-            output = args.output or reel.to_dict().get("output")
-            if not output:
-                _err(
-                    "output path required — set 'output' in reel.json or pass --output",
-                    args.human,
-                )
-                return 1
-
-        result = reel.render(output, crf=args.crf, preset=args.preset)
-
-    except FileNotFoundError as exc:
-        _err(str(exc), args.human)
-        return 1
-    except ReelError as exc:
-        _err(str(exc), args.human)
-        return 1
-    except ValueError as exc:
-        _err(str(exc), args.human)
-        return 1
-
-    data = {
-        "output": str(result),
-        "clips": len(reel.clips),
-        "gap_ms": reel.gap_ms,
-    }
-    if args.human:
-        print(f"rendered: {result}  ({len(reel.clips)} clips, {reel.gap_ms}ms gaps)")
-    else:
-        print(json.dumps(data, indent=2))
-
-    return 0
+    _err(
+        "videoflow concat is not implemented in this build "
+        "(reel / clip-assembly module not yet landed).",
+        args.human,
+    )
+    return 2
 
 
 # ---------------------------------------------------------------------------
