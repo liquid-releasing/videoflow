@@ -30,7 +30,9 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
+from videoflow.audio import analyze_beats as _analyze_beats
 from videoflow.chapters import Chapter
+from videoflow.generate import classify_modes as _classify_modes
 from videoflow.progress import OnProgress, ProgressReporter
 from videoflow.sidecar import write_sidecar as _write_sidecar
 
@@ -158,6 +160,10 @@ def auto_chapter(
                 pass
         reporter.message(label)
 
+    chapters: list[Chapter] = []
+    beat_map = None
+    phrase_modes: list[tuple[int, int, str]] = []
+
     with reporter.stage("structural.auto_chapter"):
         with reporter.stage("extract"):
             audio_path, _tmp = _prepare_audio(media_path, sr=sr, progress=_progress)
@@ -190,20 +196,44 @@ def auto_chapter(
                     reporter.complete(
                         summary=f"{len(chapters)} chapters detected",
                     )
+
+            with reporter.stage("beats"):
+                _progress("Analysing beats and energy…")
+                beat_map = _analyze_beats(
+                    audio_path, sr=sr_,
+                    chapters=chapters,
+                    on_progress=on_progress,
+                )
+                reporter.complete(
+                    summary=(
+                        f"{len(beat_map.beats)} beats, "
+                        f"{len(beat_map.phrases)} phrases @ "
+                        f"{beat_map.bpm:.1f} BPM"
+                    )
+                )
+
+            with reporter.stage("classify"):
+                phrase_modes = _classify_modes(beat_map, chapters=chapters)
+                reporter.complete(
+                    summary=f"{len(phrase_modes)} phrases classified",
+                )
         finally:
             if _tmp is not None:
                 Path(_tmp).unlink(missing_ok=True)
 
         if write_sidecar:
             with reporter.stage("sidecar"):
-                payload = {
+                payload: dict = {
                     "chapters": [c.to_dict() for c in chapters],
+                    "phrases": _build_phrases(phrase_modes, chapters),
                     "generated_by": {
                         "tool": "videoflow.structural",
                         "tool_version": _videoflow_version(),
                         "target_minutes": target_minutes,
                     },
                 }
+                if beat_map is not None:
+                    payload["energy"] = _build_energy(beat_map, chapters)
                 _write_sidecar(
                     media_path, payload,
                     writer="videoflow.structural",
@@ -211,7 +241,10 @@ def auto_chapter(
                     mode="analyze",
                 )
                 reporter.complete(
-                    summary=f"sidecar merged: {len(chapters)} chapters",
+                    summary=(
+                        f"sidecar merged: {len(chapters)} chapters, "
+                        f"{len(payload['phrases'])} phrases"
+                    ),
                 )
 
         reporter.complete(summary=f"{len(chapters)} chapters")
@@ -538,6 +571,115 @@ def _classify_content(y, sr: int) -> tuple[str, float, list[str]]:
     return "mixed", round(0.5 + abs(music_score - ambient_score) / 4.0, 3), (
         evidence or ["rms_variance"]
     )
+
+
+# ---------------------------------------------------------------------------
+# Phrase + energy payload builders (consumed by write_sidecar in auto_chapter)
+# ---------------------------------------------------------------------------
+
+def _build_phrases(
+    phrase_modes: list[tuple[int, int, str]],
+    chapters: list[Chapter],
+) -> list[dict]:
+    """Convert classify_modes output into sidecar phrase records.
+
+    Each phrase's ``chapter_idx`` is derived from its centre timestamp
+    rather than its start, so a phrase that straddles a chapter boundary
+    is attributed to the chapter where most of it lives.
+    """
+    out: list[dict] = []
+    for start_ms, end_ms, mode in phrase_modes:
+        centre_ms = (int(start_ms) + int(end_ms)) // 2
+        out.append({
+            "chapter_idx": _chapter_index_at(centre_ms, chapters),
+            "at_ms": int(start_ms),
+            "end_ms": int(end_ms),
+            "mode": mode or "",
+            "auto_generated": True,
+        })
+    return out
+
+
+def _chapter_index_at(time_ms: int, chapters: list[Chapter]) -> int:
+    """Return the index of the chapter containing *time_ms*.
+
+    Falls back to the last chapter for times beyond the final chapter's
+    end (defensive — real audio rarely produces phrases past duration).
+    Returns 0 when *chapters* is empty (caller's responsibility to
+    avoid; auto_chapter always produces at least one).
+    """
+    for i, ch in enumerate(chapters):
+        ch_end = ch.end_ms if ch.end_ms is not None else 1 << 62
+        if ch.at_ms <= time_ms < ch_end:
+            return i
+    return max(0, len(chapters) - 1)
+
+
+def _build_energy(beat_map, chapters: list[Chapter]) -> dict:
+    """Build the sidecar ``energy`` block from a chapter-aware AudioBeatMap.
+
+    Emits whole-file ``percentiles``, the inline ``beat_map`` (times +
+    strengths), and a ``per_chapter`` map keyed by chapter index with
+    its own percentile statistics, BPM derived from beat density in the
+    chapter window, and content_type when present.
+
+    The ``envelope`` field (sampled RMS over time) is not produced here
+    — videoflow.audio doesn't expose it. Schema permits absence.
+    """
+    energies = list(beat_map.energy)
+    beats_ms = list(beat_map.beats)
+    duration_ms = int(beat_map.duration_ms)
+
+    out: dict = {}
+
+    if energies:
+        sorted_e = sorted(energies)
+        out["percentiles"] = {
+            f"p{p}": round(_percentile(sorted_e, p / 100.0), 6)
+            for p in (5, 25, 50, 75, 95)
+        }
+
+    if beats_ms:
+        out["beat_map"] = {
+            "times_ms": [int(t) for t in beats_ms],
+            "strengths": [round(float(e), 6) for e in energies],
+        }
+
+    per_chapter: dict[str, dict] = {}
+    for i, ch in enumerate(chapters):
+        ch_end = ch.end_ms if ch.end_ms is not None else duration_ms
+        in_range = [
+            (b, e) for b, e in zip(beats_ms, energies)
+            if ch.at_ms <= b < ch_end
+        ]
+        if not in_range:
+            continue
+        ch_sorted = sorted(e for _, e in in_range)
+        ch_dur_s = max(0, min(ch_end, duration_ms) - ch.at_ms) / 1000.0
+        bpm = (60.0 * len(in_range) / ch_dur_s) if ch_dur_s > 0 else None
+        entry: dict = {
+            "percentiles": {
+                f"p{p}": round(_percentile(ch_sorted, p / 100.0), 6)
+                for p in (5, 25, 50, 75, 95)
+            },
+            "bpm": round(bpm, 2) if bpm is not None else None,
+        }
+        if ch.content_type:
+            entry["content_type"] = ch.content_type
+        per_chapter[str(i)] = entry
+
+    if per_chapter:
+        out["per_chapter"] = per_chapter
+
+    return out
+
+
+def _percentile(sorted_vals: list[float], p: float) -> float:
+    """Nearest-rank percentile on a pre-sorted list. Empty → 0.0."""
+    if not sorted_vals:
+        return 0.0
+    idx = max(0, min(len(sorted_vals) - 1, int(round(p * (len(sorted_vals) - 1)))))
+    return float(sorted_vals[idx])
 
 
 # ---------------------------------------------------------------------------

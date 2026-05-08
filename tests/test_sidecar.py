@@ -126,6 +126,57 @@ class TestRead(unittest.TestCase):
             with self.assertRaises(SidecarError):
                 read_sidecar(media)
 
+    def test_accepts_fast_and_slow_modes(self):
+        """classify_modes returns fast/slow; schema must accept them."""
+        with TemporaryDirectory() as td:
+            media = _media(td)
+            _chapters(td).write_text(json.dumps({
+                "chapters": [{"at_ms": 0}],
+                "phrases": [
+                    {"chapter_idx": 0, "at_ms": 0, "end_ms": 1000, "mode": "fast"},
+                    {"chapter_idx": 0, "at_ms": 1000, "end_ms": 2000, "mode": "slow"},
+                ],
+            }), encoding="utf-8")
+            doc = read_sidecar(media)
+            self.assertEqual(doc["phrases"][0]["mode"], "fast")
+            self.assertEqual(doc["phrases"][1]["mode"], "slow")
+
+    def test_accepts_locked_tone_vocabulary(self):
+        with TemporaryDirectory() as td:
+            media = _media(td)
+            _chapters(td).write_text(json.dumps({
+                "chapters": [{"at_ms": 0, "tone": "build"}],
+            }), encoding="utf-8")
+            doc = read_sidecar(media)
+            self.assertEqual(doc["chapters"][0]["tone"], "build")
+
+    def test_raises_on_invalid_tone_label(self):
+        with TemporaryDirectory() as td:
+            media = _media(td)
+            _chapters(td).write_text(json.dumps({
+                "chapters": [{"at_ms": 0, "tone": "soft"}],  # not in enum
+            }), encoding="utf-8")
+            with self.assertRaises(SidecarError):
+                read_sidecar(media)
+
+    def test_accepts_locked_shape_vocabulary(self):
+        with TemporaryDirectory() as td:
+            media = _media(td)
+            _chapters(td).write_text(json.dumps({
+                "chapters": [{"at_ms": 0, "shape": "rise"}],
+            }), encoding="utf-8")
+            doc = read_sidecar(media)
+            self.assertEqual(doc["chapters"][0]["shape"], "rise")
+
+    def test_raises_on_invalid_shape(self):
+        with TemporaryDirectory() as td:
+            media = _media(td)
+            _chapters(td).write_text(json.dumps({
+                "chapters": [{"at_ms": 0, "shape": "wobble"}],  # not in enum
+            }), encoding="utf-8")
+            with self.assertRaises(SidecarError):
+                read_sidecar(media)
+
     def test_v1_top_level_user_edited_propagates_to_records(self):
         """v1 sidecars with top-level auto_generated=false: each chapter is latched."""
         with TemporaryDirectory() as td:
@@ -314,19 +365,19 @@ class TestMergeAnalyze(unittest.TestCase):
         with TemporaryDirectory() as td:
             media = self._seed(td, {
                 "chapters": [
-                    {"at_ms": 0, "tone": "soft", "auto_generated": True},
-                    {"at_ms": 1000, "tone": "soft", "auto_generated": False},
+                    {"at_ms": 0, "tone": "tender", "auto_generated": True},
+                    {"at_ms": 1000, "tone": "tender", "auto_generated": False},
                 ],
             })
             write_sidecar(media, {
                 "chapters": [
-                    {"at_ms": 0, "tone": "driving"},
-                    {"at_ms": 1000, "tone": "driving"},
+                    {"at_ms": 0, "tone": "build"},
+                    {"at_ms": 1000, "tone": "build"},
                 ],
             }, writer="videoflow.structural")
             doc = json.loads(_chapters(td).read_text())
-            self.assertEqual(doc["chapters"][0]["tone"], "driving")  # latch open
-            self.assertEqual(doc["chapters"][1]["tone"], "soft")     # latched
+            self.assertEqual(doc["chapters"][0]["tone"], "build")    # latch open
+            self.assertEqual(doc["chapters"][1]["tone"], "tender")   # latched
 
     def test_energy_block_replaced_wholesale(self):
         with TemporaryDirectory() as td:

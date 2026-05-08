@@ -154,7 +154,8 @@ The existing `progress_callback` hook (added in videoflow 0.0.4 for staged feedb
       "content_type": "ambient",       // ANALYTICAL — from auto-detection
       "confidence": 0.81,              // ANALYTICAL — detection confidence
       "evidence": ["mfcc", "silence"], // ANALYTICAL — feature ids that fired
-      "tone": "soft",                  // MIXED — content tonality / stim character
+      "tone": "tender",                // MIXED — FunscriptForge mood (closed enum)
+      "shape": "auto",                 // MIXED — forgegen curve direction (closed enum)
       "include": true,                 // AUTHORED — false = consumer skips
       "auto_generated": true           // per-record latch (see merge rules)
     },
@@ -166,7 +167,8 @@ The existing `progress_callback` hook (added in videoflow 0.0.4 for staged feedb
       "content_type": "music",
       "confidence": 0.94,
       "evidence": ["mfcc", "rms_variance"],
-      "tone": "driving",
+      "tone": "build",
+      "shape": "rise",
       "include": true,
       "auto_generated": false          // user has touched this — frozen on regen
     }
@@ -179,9 +181,9 @@ The existing `progress_callback` hook (added in videoflow 0.0.4 for staged feedb
       "end_ms": 488000,
       "intent": "build",               // AUTHORED — phrase-intent vocabulary
       "mode": "tease",                 // ANALYTICAL — from classify_modes
-      "confidence": 0.72,
-      "evidence": ["beat_density"],
-      "tone": "soft",                  // optional override of chapter tone
+      "confidence": null,              // classify_modes is rule-based; no confidence
+      "evidence": [],
+      "tone": "tender",                // MIXED — optional FunscriptForge tone override
       "auto_generated": true
     },
     {
@@ -252,7 +254,8 @@ When optional fields are absent, consumers that care about them treat the data a
 | `content_type` | str | ANALYTICAL | `music` / `ambient` / `mixed` / `""` |
 | `confidence` | float? | ANALYTICAL | detection confidence in `[0, 1]` |
 | `evidence` | str[] | ANALYTICAL | feature ids the detector fired on |
-| `tone` | str | MIXED | content tonality / stim character |
+| `tone` | str | MIXED | FunscriptForge mood label (see [tone vocabulary](#tone-vocabulary)) |
+| `shape` | str | MIXED | forgegen curve-direction primitive: `flat` / `rise` / `fall` / `auto` |
 | `include` | bool | AUTHORED | `false` = consumer skips this chapter; default `true` |
 | `auto_generated` | bool | LATCH | `false` = freeze ALL fields on regen (see merge rules) |
 
@@ -266,13 +269,41 @@ STRUCTURAL fields are immutable in spirit — moving a chapter boundary creates 
 | `at_ms` | int | STRUCTURAL | required; phrase start in milliseconds |
 | `end_ms` | int | STRUCTURAL | required; phrase end in milliseconds |
 | `intent` | str | AUTHORED | phrase-intent vocabulary; default `""` |
-| `mode` | str | ANALYTICAL | from `classify_modes`: `tease` / `steady` / `pump` / `edging` / `break` |
+| `mode` | str | ANALYTICAL | from `classify_modes`: `tease` / `steady` / `edging` / `break` / `fast` / `slow` |
 | `confidence` | float? | ANALYTICAL | mode-classification confidence in `[0, 1]` |
 | `evidence` | str[] | ANALYTICAL | feature ids; default `[]` |
 | `tone` | str | MIXED | optional override of chapter tone |
 | `auto_generated` | bool | LATCH | `false` = freeze on regen |
 
 Phrases are not required to be contiguous or to cover the whole chapter — they mark recognised intent units only.
+
+### Tone vocabulary
+
+Two distinct primitives share the word "tone" in the lqr toolchain. The schema separates them.
+
+**`tone`** — FunscriptForge mood vocabulary. Closed enum, set by FunscriptForge based on user choice or its tone-suggestion algorithm. Cross-product authorial primitive — a chapter's tone is "what mood is this scene." Per-tone slider parameters (Tender → Softness/Pulse onset; Build → Build rate/Starting intensity/Arc width; etc.) live alongside in a future `tone_params` block.
+
+| Value | Tagline | Source |
+|---|---|---|
+| `""` | unassigned | default |
+| `tender` | slow and close | [FunscriptForge tone.md](https://github.com/liquid-releasing/funscriptforge/blob/main/docs/guide/tone.md) |
+| `build` | tension grows | ↑ |
+| `tease` | pull back at the peak | ↑ |
+| `edge` | hold there | ↑ |
+| `climax` | everything, now | ↑ |
+| `dominant` | driving, relentless | ↑ |
+
+**`shape`** — forgegen curve-direction primitive. Closed enum, set by forgegen. Drives the per-phrase center trajectory used by `beats_to_curve(tone_per_phrase=…)`. Not a mood label — it answers "should this chapter's curve sit flat, climb, fall, or follow the audio's energy slope?" Forgegen's UI labels this control "Tone" for end users; the schema field is named `shape` to avoid collision with FunscriptForge's mood `tone` in the data model.
+
+| Value | Behaviour |
+|---|---|
+| `""` | unassigned |
+| `flat` | center holds at baseline through the chapter |
+| `rise` | center starts low, ends high |
+| `fall` | center starts high, ends low |
+| `auto` | per-phrase slope from `compute_auto_tone` |
+
+The two are independent: a `Build` chapter typically pairs with `shape: "rise"`, but a creator may choose `Build` mood with a `shape: "flat"` curve to add tension without spatial climb. The schema keeps them as separate fields so each can be set, overridden, and merged independently.
 
 ### Energy block
 

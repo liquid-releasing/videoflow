@@ -43,7 +43,7 @@ WriteMode = Literal["analyze", "edit"]
 # Field categories — drives merge. See audio-structure-primitive.md.
 _CHAPTER_ANALYTICAL: tuple[str, ...] = ("content_type", "confidence", "evidence")
 _CHAPTER_AUTHORED: tuple[str, ...] = ("name", "intent", "include")
-_CHAPTER_MIXED: tuple[str, ...] = ("tone",)
+_CHAPTER_MIXED: tuple[str, ...] = ("tone", "shape")
 _CHAPTER_STRUCTURAL: tuple[str, ...] = ("at_ms", "end_ms")
 
 _PHRASE_ANALYTICAL: tuple[str, ...] = ("mode", "confidence", "evidence")
@@ -52,7 +52,19 @@ _PHRASE_MIXED: tuple[str, ...] = ("tone",)
 _PHRASE_STRUCTURAL: tuple[str, ...] = ("chapter_idx", "at_ms", "end_ms")
 
 _VALID_CONTENT_TYPES = frozenset({"", "music", "ambient", "mixed"})
-_VALID_PHRASE_MODES = frozenset({"", "tease", "steady", "pump", "edging", "break"})
+_VALID_PHRASE_MODES = frozenset({"", "tease", "steady", "edging", "break", "fast", "slow"})
+
+# FunscriptForge mood vocabulary (closed enum, cross-product semantic).
+# See videoflow/docs/architecture/audio-structure-primitive.md#tone-vocabulary
+# and funscriptforge/docs/guide/tone.md.
+_VALID_TONE_LABELS = frozenset({
+    "", "tender", "build", "tease", "edge", "climax", "dominant",
+})
+
+# forgegen curve-direction primitive (closed enum). Drives the per-phrase
+# center trajectory used by beats_to_curve. Distinct from `tone` above.
+# Sidecar field name is `shape`; forgegen's UI labels this control "Tone".
+_VALID_SHAPES = frozenset({"", "flat", "rise", "fall", "auto"})
 
 
 class SidecarError(RuntimeError):
@@ -267,6 +279,18 @@ def _validate_chapter(ch: Any, *, source: str, idx: int) -> None:
             f"{source}: chapters[{idx}].content_type must be one of "
             f"{sorted(_VALID_CONTENT_TYPES)}, got {ct!r}"
         )
+    tone = ch.get("tone")
+    if tone is not None and tone not in _VALID_TONE_LABELS:
+        raise SidecarError(
+            f"{source}: chapters[{idx}].tone must be one of "
+            f"{sorted(_VALID_TONE_LABELS)}, got {tone!r}"
+        )
+    shape = ch.get("shape")
+    if shape is not None and shape not in _VALID_SHAPES:
+        raise SidecarError(
+            f"{source}: chapters[{idx}].shape must be one of "
+            f"{sorted(_VALID_SHAPES)}, got {shape!r}"
+        )
 
 
 def _validate_phrase(ph: Any, *, source: str, idx: int) -> None:
@@ -285,6 +309,12 @@ def _validate_phrase(ph: Any, *, source: str, idx: int) -> None:
         raise SidecarError(
             f"{source}: phrases[{idx}].mode must be one of "
             f"{sorted(_VALID_PHRASE_MODES)}, got {mode!r}"
+        )
+    tone = ph.get("tone")
+    if tone is not None and tone not in _VALID_TONE_LABELS:
+        raise SidecarError(
+            f"{source}: phrases[{idx}].tone must be one of "
+            f"{sorted(_VALID_TONE_LABELS)}, got {tone!r}"
         )
 
 

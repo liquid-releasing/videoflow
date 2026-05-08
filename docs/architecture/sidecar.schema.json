@@ -97,8 +97,15 @@
         },
         "tone": {
           "type": "string",
+          "enum": ["", "tender", "build", "tease", "edge", "climax", "dominant"],
           "default": "",
-          "description": "MIXED. Content tonality / stim character. forgegen assigns per chapter; FunscriptForge can override per phrase."
+          "description": "MIXED. FunscriptForge mood label (closed enum). Authorial; forgegen does not assign."
+        },
+        "shape": {
+          "type": "string",
+          "enum": ["", "flat", "rise", "fall", "auto"],
+          "default": "",
+          "description": "MIXED. forgegen curve-direction primitive. Drives the per-phrase center trajectory used by beats_to_curve. Distinct from `tone` (mood label). Forgegen's UI labels this control 'Tone' for end users; the schema field is `shape` to avoid colliding with FunscriptForge's mood `tone` in the data model."
         },
         "include": {
           "type": "boolean",
@@ -138,7 +145,7 @@
         },
         "mode": {
           "type": "string",
-          "enum": ["", "tease", "steady", "pump", "edging", "break"],
+          "enum": ["", "tease", "steady", "edging", "break", "fast", "slow"],
           "default": "",
           "description": "ANALYTICAL. From classify_modes."
         },

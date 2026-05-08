@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -10,10 +11,15 @@ from unittest.mock import patch
 import numpy as np
 import soundfile as sf
 
+from videoflow.chapters import Chapter
 from videoflow.structural import (
     AutoChapterError,
+    _build_energy,
+    _build_phrases,
+    _chapter_index_at,
     _classify_content,
     _merge_micro_chapters,
+    _percentile,
     _segment_boundaries,
     _silence_breakpoints,
     _snap_to_silence,
@@ -221,6 +227,170 @@ class TestClassifyContent(unittest.TestCase):
 
 # Sidecar persistence is now videoflow.sidecar.write_sidecar's responsibility;
 # see tests/test_sidecar.py for read / write / merge coverage.
+
+
+# ---------------------------------------------------------------------------
+# Phrase + energy payload builders
+# ---------------------------------------------------------------------------
+
+class TestChapterIndexAt(unittest.TestCase):
+
+    def setUp(self):
+        self.chapters = [
+            Chapter(at_ms=0, end_ms=1000),
+            Chapter(at_ms=1000, end_ms=2000),
+            Chapter(at_ms=2000, end_ms=3000),
+        ]
+
+    def test_finds_chapter_for_time_in_range(self):
+        self.assertEqual(_chapter_index_at(500, self.chapters), 0)
+        self.assertEqual(_chapter_index_at(1500, self.chapters), 1)
+        self.assertEqual(_chapter_index_at(2500, self.chapters), 2)
+
+    def test_boundary_is_inclusive_on_start(self):
+        self.assertEqual(_chapter_index_at(1000, self.chapters), 1)
+
+    def test_time_beyond_last_falls_to_last_chapter(self):
+        self.assertEqual(_chapter_index_at(99_999, self.chapters), 2)
+
+    def test_handles_chapter_with_none_end_ms(self):
+        chapters = [Chapter(at_ms=0, end_ms=None)]
+        self.assertEqual(_chapter_index_at(99_999, chapters), 0)
+
+
+class TestBuildPhrases(unittest.TestCase):
+
+    def test_each_phrase_carries_required_fields(self):
+        chapters = [Chapter(at_ms=0, end_ms=10_000)]
+        phrase_modes = [
+            (0, 4_000, "tease"),
+            (4_000, 8_000, "edging"),
+        ]
+        phrases = _build_phrases(phrase_modes, chapters)
+        self.assertEqual(len(phrases), 2)
+        for ph in phrases:
+            self.assertIn("chapter_idx", ph)
+            self.assertIn("at_ms", ph)
+            self.assertIn("end_ms", ph)
+            self.assertIn("mode", ph)
+            self.assertTrue(ph["auto_generated"])
+
+    def test_chapter_idx_assigned_by_phrase_centre(self):
+        chapters = [
+            Chapter(at_ms=0, end_ms=1000),
+            Chapter(at_ms=1000, end_ms=2000),
+        ]
+        # Phrase straddles 800-1200; centre at 1000 → chapter 1.
+        phrases = _build_phrases([(800, 1200, "steady")], chapters)
+        self.assertEqual(phrases[0]["chapter_idx"], 1)
+
+
+class TestBuildEnergy(unittest.TestCase):
+
+    class _FakeBeatMap:
+        def __init__(self, beats, energy, duration_ms):
+            self.beats = beats
+            self.energy = energy
+            self.duration_ms = duration_ms
+
+    def test_emits_percentiles_and_beat_map(self):
+        bm = self._FakeBeatMap(
+            beats=[0, 500, 1000, 1500, 2000],
+            energy=[0.1, 0.2, 0.5, 0.8, 0.9],
+            duration_ms=2500,
+        )
+        chapters = [Chapter(at_ms=0, end_ms=2500, content_type="music")]
+        energy = _build_energy(bm, chapters)
+        self.assertIn("percentiles", energy)
+        for key in ("p5", "p25", "p50", "p75", "p95"):
+            self.assertIn(key, energy["percentiles"])
+        self.assertEqual(energy["beat_map"]["times_ms"], [0, 500, 1000, 1500, 2000])
+        self.assertEqual(len(energy["beat_map"]["strengths"]), 5)
+
+    def test_per_chapter_block_has_bpm_and_content_type(self):
+        bm = self._FakeBeatMap(
+            beats=[0, 500, 1000, 1500],  # 4 beats over 2 seconds = 120 BPM
+            energy=[0.1, 0.2, 0.3, 0.4],
+            duration_ms=2000,
+        )
+        chapters = [Chapter(at_ms=0, end_ms=2000, content_type="music")]
+        energy = _build_energy(bm, chapters)
+        self.assertIn("0", energy["per_chapter"])
+        per = energy["per_chapter"]["0"]
+        self.assertIn("percentiles", per)
+        self.assertIsNotNone(per["bpm"])
+        self.assertEqual(per["content_type"], "music")
+
+    def test_per_chapter_skips_empty_chapters(self):
+        bm = self._FakeBeatMap(
+            beats=[100, 200],
+            energy=[0.5, 0.5],
+            duration_ms=2000,
+        )
+        chapters = [
+            Chapter(at_ms=0, end_ms=300),       # has beats
+            Chapter(at_ms=1500, end_ms=2000),   # empty range
+        ]
+        energy = _build_energy(bm, chapters)
+        self.assertIn("0", energy["per_chapter"])
+        self.assertNotIn("1", energy["per_chapter"])
+
+
+class TestPercentile(unittest.TestCase):
+
+    def test_empty_returns_zero(self):
+        self.assertEqual(_percentile([], 0.5), 0.0)
+
+    def test_p50_of_uniform_is_middle(self):
+        self.assertAlmostEqual(_percentile([0.0, 0.5, 1.0], 0.5), 0.5)
+
+    def test_p5_picks_lowest_quintile(self):
+        sorted_vals = [float(i) for i in range(100)]
+        self.assertLess(_percentile(sorted_vals, 0.05), 10)
+
+
+# ---------------------------------------------------------------------------
+# Integration — auto_chapter writes phrases + energy into the sidecar
+# ---------------------------------------------------------------------------
+
+class TestAutoChapterEmitsExpandedSidecar(unittest.TestCase):
+
+    def test_short_file_sidecar_carries_phrases_and_energy_blocks(self):
+        """auto_chapter on a real audio file lands chapters + phrases + energy.
+
+        Uses a click track so analyze_beats / classify_modes have real
+        rhythmic content to work on (unlike a uniform sine wave).
+        """
+        sr = 22050
+        with TemporaryDirectory() as td:
+            path = _save_wav(
+                Path(td) / "track.wav",
+                _click_track(30.0, sr, bpm=120.0),
+                sr,
+            )
+            auto_chapter(path, write_sidecar=True)
+
+            sidecar = path.with_name("track.chapters.json")
+            self.assertTrue(sidecar.exists())
+            doc = json.loads(sidecar.read_text(encoding="utf-8"))
+
+            # Schema upgraded to v2 by the new write path
+            self.assertEqual(doc["version"], "2.0")
+            self.assertEqual(doc["schema"], "audio-structure")
+            self.assertGreaterEqual(len(doc["chapters"]), 1)
+
+            # phrases is always present (may be empty if classify_modes
+            # found nothing), energy is present when beats were analyzed.
+            self.assertIn("phrases", doc)
+            self.assertIn("energy", doc)
+            self.assertIn("percentiles", doc["energy"])
+            self.assertIn("beat_map", doc["energy"])
+
+            # provenance entry recorded
+            self.assertGreaterEqual(len(doc["provenance"]), 1)
+            self.assertEqual(
+                doc["provenance"][-1]["writer"], "videoflow.structural",
+            )
 
 
 if __name__ == "__main__":
