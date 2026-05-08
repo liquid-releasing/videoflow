@@ -1,0 +1,280 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://liquid-releasing.github.io/videoflow/schemas/sidecar.schema.json",
+  "title": "videoflow audio-structure sidecar",
+  "description": "Schema for <stem>.chapters.json — the structural database for one media file. See videoflow/docs/architecture/audio-structure-primitive.md for design rationale, field categories, and merge semantics.",
+  "type": "object",
+  "required": ["chapters"],
+  "properties": {
+    "schema": {
+      "const": "audio-structure",
+      "description": "Identifies this file shape. Optional in v2.x for back-compat with v1 sidecars; required by writers going forward."
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+(\\.\\d+)?$",
+      "description": "Schema version. 2.x is the expanded shape (chapters + phrases + energy + provenance). 1.x is chapters-only."
+    },
+    "auto_generated": {
+      "type": "boolean",
+      "description": "Top-level marker. false indicates the file has been edited by a UI. Per-record auto_generated on each chapter / phrase is more precise and is what merge rules actually consult."
+    },
+    "generated_by": {
+      "type": "object",
+      "description": "Identifies the tool that originally produced the sidecar. Provenance entries record subsequent writes.",
+      "required": ["tool"],
+      "properties": {
+        "tool": { "type": "string" },
+        "tool_version": { "type": "string" },
+        "generated_at": { "type": "string", "format": "date-time" },
+        "target_minutes": { "type": "number", "exclusiveMinimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "chapters": {
+      "type": "array",
+      "description": "Ordered list of chapters covering the media's timeline.",
+      "items": { "$ref": "#/$defs/Chapter" }
+    },
+    "phrases": {
+      "type": "array",
+      "description": "Within-chapter intent units. Not required to be contiguous or to cover the whole chapter.",
+      "items": { "$ref": "#/$defs/Phrase" }
+    },
+    "energy": {
+      "$ref": "#/$defs/Energy",
+      "description": "Energy / beat / envelope analysis. Absent means not analyzed; consumers should run analysis if they need it."
+    },
+    "provenance": {
+      "type": "array",
+      "description": "Append-only audit log of writers. Oldest first.",
+      "items": { "$ref": "#/$defs/ProvenanceEntry" }
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "Chapter": {
+      "type": "object",
+      "required": ["at_ms"],
+      "properties": {
+        "at_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "STRUCTURAL. Chapter start in milliseconds."
+        },
+        "end_ms": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "STRUCTURAL. Chapter end in milliseconds. null = until next chapter or end of media."
+        },
+        "name": {
+          "type": "string",
+          "default": "",
+          "description": "AUTHORED. Human label."
+        },
+        "intent": {
+          "type": "string",
+          "default": "",
+          "description": "AUTHORED. Chapter intent vocabulary (intro / build / sustain / edge / climax / recover / outro)."
+        },
+        "content_type": {
+          "type": "string",
+          "enum": ["", "music", "ambient", "mixed"],
+          "default": "",
+          "description": "ANALYTICAL. Audio content-type heuristic from auto-detection."
+        },
+        "confidence": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "ANALYTICAL. Detection confidence."
+        },
+        "evidence": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "ANALYTICAL. Feature ids that fired (mfcc / silence / rms_variance / recurrence_matrix / ...)."
+        },
+        "tone": {
+          "type": "string",
+          "default": "",
+          "description": "MIXED. Content tonality / stim character. forgegen assigns per chapter; FunscriptForge can override per phrase."
+        },
+        "include": {
+          "type": "boolean",
+          "default": true,
+          "description": "AUTHORED. false = consumer skips this chapter (don't generate, don't include in assembly, don't render in nav)."
+        },
+        "auto_generated": {
+          "type": "boolean",
+          "description": "LATCH. false = this record was authored / edited by a user; freeze ALL fields including ANALYTICAL on the next regen."
+        }
+      },
+      "additionalProperties": true
+    },
+    "Phrase": {
+      "type": "object",
+      "required": ["chapter_idx", "at_ms", "end_ms"],
+      "properties": {
+        "chapter_idx": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "STRUCTURAL. 0-based index into chapters[]."
+        },
+        "at_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "STRUCTURAL. Phrase start in milliseconds."
+        },
+        "end_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "STRUCTURAL. Phrase end in milliseconds."
+        },
+        "intent": {
+          "type": "string",
+          "default": "",
+          "description": "AUTHORED. Phrase intent vocabulary."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["", "tease", "steady", "pump", "edging", "break"],
+          "default": "",
+          "description": "ANALYTICAL. From classify_modes."
+        },
+        "confidence": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "ANALYTICAL. Mode-classification confidence."
+        },
+        "evidence": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "ANALYTICAL. Feature ids that fired."
+        },
+        "tone": {
+          "type": "string",
+          "default": "",
+          "description": "MIXED. Optional override of chapter tone for this phrase."
+        },
+        "auto_generated": {
+          "type": "boolean",
+          "description": "LATCH. false = freeze on regen."
+        }
+      },
+      "additionalProperties": true
+    },
+    "Percentiles": {
+      "type": "object",
+      "required": ["p5", "p25", "p50", "p75", "p95"],
+      "properties": {
+        "p5":  { "type": "number" },
+        "p25": { "type": "number" },
+        "p50": { "type": "number" },
+        "p75": { "type": "number" },
+        "p95": { "type": "number" }
+      },
+      "additionalProperties": false
+    },
+    "Energy": {
+      "type": "object",
+      "properties": {
+        "percentiles": {
+          "$ref": "#/$defs/Percentiles",
+          "description": "Whole-file percentiles of the normalised RMS envelope."
+        },
+        "beat_map": {
+          "type": "object",
+          "required": ["times_ms"],
+          "properties": {
+            "times_ms": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 0 },
+              "description": "Beat positions in milliseconds, monotonically increasing."
+            },
+            "strengths": {
+              "type": "array",
+              "items": { "type": "number", "minimum": 0, "maximum": 1 },
+              "description": "Beat strength in [0, 1]; same length as times_ms when present."
+            }
+          },
+          "additionalProperties": true
+        },
+        "envelope": {
+          "description": "Sampled RMS envelope. May be inlined (sample_rate_hz + times_ms + values) or externalised ({external: true}); when external, the envelope lives in <stem>.energy.json.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["sample_rate_hz", "values"],
+              "properties": {
+                "sample_rate_hz": { "type": "number", "exclusiveMinimum": 0 },
+                "times_ms": {
+                  "type": "array",
+                  "items": { "type": "integer", "minimum": 0 }
+                },
+                "values": {
+                  "type": "array",
+                  "items": { "type": "number" }
+                }
+              },
+              "additionalProperties": true
+            },
+            {
+              "type": "object",
+              "required": ["external"],
+              "properties": {
+                "external": { "const": true }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "per_chapter": {
+          "type": "object",
+          "description": "Per-chapter analysis keyed by stringified chapter index.",
+          "patternProperties": {
+            "^[0-9]+$": {
+              "type": "object",
+              "properties": {
+                "percentiles": { "$ref": "#/$defs/Percentiles" },
+                "bpm": { "type": ["number", "null"] },
+                "content_type": { "type": "string" },
+                "evidence": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": true
+    },
+    "ProvenanceEntry": {
+      "type": "object",
+      "required": ["writer", "written_at"],
+      "properties": {
+        "writer": {
+          "type": "string",
+          "description": "Module or app id (e.g. videoflow.structural, FunscriptForge, forgeassembler)."
+        },
+        "writer_version": { "type": "string" },
+        "written_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO-8601 UTC."
+        },
+        "fields": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Dotted paths or block names touched by this write (e.g. chapters[1].name, phrases, energy.beat_map)."
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}
