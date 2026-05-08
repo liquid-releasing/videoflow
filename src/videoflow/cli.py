@@ -186,6 +186,57 @@ def cmd_analyze_beats(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# auto-chapter — detect chapter boundaries + emit structural sidecar
+# ---------------------------------------------------------------------------
+
+def cmd_auto_chapter(args: argparse.Namespace) -> int:
+    from videoflow.structural import AutoChapterError, auto_chapter
+
+    try:
+        chapters = auto_chapter(
+            args.input,
+            target_minutes=args.target_minutes,
+            write_sidecar=not args.no_sidecar,
+        )
+    except FileNotFoundError as exc:
+        _err(str(exc), args.human)
+        return 1
+    except AutoChapterError as exc:
+        _err(str(exc), args.human)
+        return 1
+
+    sidecar_path = (
+        Path(args.input).with_name(Path(args.input).stem + ".chapters.json")
+        if not args.no_sidecar else None
+    )
+
+    data = {
+        "input": str(args.input),
+        "chapter_count": len(chapters),
+        "chapters": [c.to_dict() for c in chapters],
+    }
+    if sidecar_path is not None:
+        data["sidecar"] = str(sidecar_path)
+
+    if args.human:
+        print(f"input:         {args.input}")
+        print(f"chapter_count: {len(chapters)}")
+        if sidecar_path is not None:
+            print(f"sidecar:       {sidecar_path}")
+        for i, ch in enumerate(chapters):
+            end = ch.end_ms if ch.end_ms is not None else "—"
+            print(
+                f"  chapter {i + 1:>3}: {ch.at_ms / 1000:>7.1f}s — "
+                f"{(end / 1000) if isinstance(end, int) else end:>7}s  "
+                f"{ch.content_type or '?':>7}  conf={ch.confidence}"
+            )
+    else:
+        print(json.dumps(data, indent=2))
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # generate-funscript — audio/beat-map → .funscript
 # ---------------------------------------------------------------------------
 
@@ -402,6 +453,39 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_beats.set_defaults(func=cmd_analyze_beats)
+
+    # auto-chapter — detect chapters + emit structural sidecar
+    p_auto = sub.add_parser(
+        "auto-chapter",
+        help=(
+            "Detect natural chapter boundaries and write the structural "
+            "<stem>.chapters.json sidecar (chapters + phrases + energy)."
+        ),
+    )
+    p_auto.add_argument("input", type=Path, help="Input audio or video file.")
+    p_auto.add_argument(
+        "--target-minutes",
+        type=float,
+        default=5.5,
+        dest="target_minutes",
+        help=(
+            "Average target chapter length in minutes (default 5.5). "
+            "Boundaries snap to silence and recurrence-cluster edges, so "
+            "actual lengths vary."
+        ),
+    )
+    p_auto.add_argument(
+        "--no-sidecar",
+        action="store_true",
+        dest="no_sidecar",
+        help=(
+            "Skip writing the sidecar; print detection results only. "
+            "By default the analysis is merged into <stem>.chapters.json "
+            "via the field-level merge contract — user edits are preserved "
+            "per-record."
+        ),
+    )
+    p_auto.set_defaults(func=cmd_auto_chapter)
 
     # generate-funscript
     p_gen = sub.add_parser(

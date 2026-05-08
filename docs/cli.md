@@ -3,6 +3,37 @@
 `videoflow` provides a thin CLI on top of the Python API. Every command
 prints JSON by default; add `--human` for a readable summary.
 
+## `auto-chapter`
+
+Detect natural chapter boundaries in long-form audio or video. Writes the structural `<stem>.chapters.json` sidecar — chapters + phrases + energy — that every other lqr tool reads to work against the natural shape of the content instead of treating it as one undifferentiated stream.
+
+```bash
+videoflow auto-chapter MEDIA [--target-minutes N] [--no-sidecar] [--human]
+```
+
+Flags:
+
+- `--target-minutes N` — average target chapter length in minutes (default 5.5). Boundaries snap to silence and recurrence-cluster edges, so actual lengths vary.
+- `--no-sidecar` — skip writing the sidecar; print detection results only.
+- `--human` — readable output instead of JSON.
+
+The default writes the sidecar in **merge mode**: a re-run preserves user edits per-record through the field-level merge contract. Records flagged `auto_generated: false` (the safety latch) are frozen entirely; analytical fields on un-latched records are recomputed. See [audio-structure-primitive.md](architecture/audio-structure-primitive.md) for the merge rules.
+
+Example:
+
+```bash
+# Detect chapters + write track.chapters.json next to the source
+videoflow auto-chapter track.mp4
+
+# Print detection results without persisting
+videoflow auto-chapter track.mp4 --no-sidecar --human
+
+# Aim for shorter chunks
+videoflow auto-chapter long-set.mp3 --target-minutes 3.0
+```
+
+Long-form material (≥ 8 min) is chunked; shorter files return one whole-file chapter. Either way, the sidecar grows the full v2 schema (chapters + phrases from `classify_modes` + energy block from `analyze_beats(chapters=…)`).
+
 ## `analyze-beats`
 
 Run beat detection on an audio file.
