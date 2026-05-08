@@ -155,6 +155,11 @@
           "maximum": 1,
           "description": "ANALYTICAL. Mode-classification confidence."
         },
+        "source": {
+          "type": "string",
+          "default": "",
+          "description": "ANALYTICAL. Classifier lineage: 'audio' (classify_phrases), 'funscript' (classify_phrases_from_funscript), 'user' (UI edit), or empty."
+        },
         "evidence": {
           "type": "array",
           "items": { "type": "string" },
@@ -163,8 +168,9 @@
         },
         "tone": {
           "type": "string",
+          "enum": ["", "tender", "build", "tease", "edge", "climax", "dominant"],
           "default": "",
-          "description": "MIXED. Optional override of chapter tone for this phrase."
+          "description": "MIXED. Optional FunscriptForge tone override for this phrase."
         },
         "auto_generated": {
           "type": "boolean",

@@ -181,7 +181,8 @@ The existing `progress_callback` hook (added in videoflow 0.0.4 for staged feedb
       "end_ms": 488000,
       "intent": "build",               // AUTHORED — phrase-intent vocabulary
       "mode": "tease",                 // ANALYTICAL — from classify_modes
-      "confidence": null,              // classify_modes is rule-based; no confidence
+      "confidence": null,              // rule-based classifier; no confidence
+      "source": "audio",               // ANALYTICAL — classify_phrases (audio-driven)
       "evidence": [],
       "tone": "tender",                // MIXED — optional FunscriptForge tone override
       "auto_generated": true
@@ -193,6 +194,7 @@ The existing `progress_callback` hook (added in videoflow 0.0.4 for staged feedb
       "intent": "sustain",
       "mode": "steady",
       "confidence": 0.85,
+      "source": "audio",
       "evidence": ["beat_density", "energy_envelope"],
       "auto_generated": true
     }
@@ -271,6 +273,7 @@ STRUCTURAL fields are immutable in spirit — moving a chapter boundary creates 
 | `intent` | str | AUTHORED | phrase-intent vocabulary; default `""` |
 | `mode` | str | ANALYTICAL | from `classify_modes`: `tease` / `steady` / `edging` / `break` / `fast` / `slow` |
 | `confidence` | float? | ANALYTICAL | mode-classification confidence in `[0, 1]` |
+| `source` | str | ANALYTICAL | classifier lineage: `audio` (`classify_phrases`) / `funscript` (`classify_phrases_from_funscript`) / `user` (UI edit) / `""` |
 | `evidence` | str[] | ANALYTICAL | feature ids; default `[]` |
 | `tone` | str | MIXED | optional override of chapter tone |
 | `auto_generated` | bool | LATCH | `false` = freeze on regen |

@@ -22,6 +22,11 @@ from videoflow.generate import (
     generate_from_beats,
     shape_curve,
 )
+from videoflow.phrases import (
+    Phrase,
+    classify_phrases,
+    classify_phrases_from_funscript,
+)
 from videoflow.progress import (
     ETAEstimator,
     OnProgress,
@@ -58,6 +63,9 @@ __all__ = [
     "export_funscript",
     "generate_from_beats",
     "shape_curve",
+    "Phrase",
+    "classify_phrases",
+    "classify_phrases_from_funscript",
     "ETAEstimator",
     "OnProgress",
     "ProgressReporter",

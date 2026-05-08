@@ -15,8 +15,6 @@ from videoflow.chapters import Chapter
 from videoflow.structural import (
     AutoChapterError,
     _build_energy,
-    _build_phrases,
-    _chapter_index_at,
     _classify_content,
     _merge_micro_chapters,
     _percentile,
@@ -230,60 +228,9 @@ class TestClassifyContent(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Phrase + energy payload builders
+# Energy payload builder (phrase classification + chapter-index lookup
+# moved to videoflow.phrases — see tests/test_phrases.py)
 # ---------------------------------------------------------------------------
-
-class TestChapterIndexAt(unittest.TestCase):
-
-    def setUp(self):
-        self.chapters = [
-            Chapter(at_ms=0, end_ms=1000),
-            Chapter(at_ms=1000, end_ms=2000),
-            Chapter(at_ms=2000, end_ms=3000),
-        ]
-
-    def test_finds_chapter_for_time_in_range(self):
-        self.assertEqual(_chapter_index_at(500, self.chapters), 0)
-        self.assertEqual(_chapter_index_at(1500, self.chapters), 1)
-        self.assertEqual(_chapter_index_at(2500, self.chapters), 2)
-
-    def test_boundary_is_inclusive_on_start(self):
-        self.assertEqual(_chapter_index_at(1000, self.chapters), 1)
-
-    def test_time_beyond_last_falls_to_last_chapter(self):
-        self.assertEqual(_chapter_index_at(99_999, self.chapters), 2)
-
-    def test_handles_chapter_with_none_end_ms(self):
-        chapters = [Chapter(at_ms=0, end_ms=None)]
-        self.assertEqual(_chapter_index_at(99_999, chapters), 0)
-
-
-class TestBuildPhrases(unittest.TestCase):
-
-    def test_each_phrase_carries_required_fields(self):
-        chapters = [Chapter(at_ms=0, end_ms=10_000)]
-        phrase_modes = [
-            (0, 4_000, "tease"),
-            (4_000, 8_000, "edging"),
-        ]
-        phrases = _build_phrases(phrase_modes, chapters)
-        self.assertEqual(len(phrases), 2)
-        for ph in phrases:
-            self.assertIn("chapter_idx", ph)
-            self.assertIn("at_ms", ph)
-            self.assertIn("end_ms", ph)
-            self.assertIn("mode", ph)
-            self.assertTrue(ph["auto_generated"])
-
-    def test_chapter_idx_assigned_by_phrase_centre(self):
-        chapters = [
-            Chapter(at_ms=0, end_ms=1000),
-            Chapter(at_ms=1000, end_ms=2000),
-        ]
-        # Phrase straddles 800-1200; centre at 1000 → chapter 1.
-        phrases = _build_phrases([(800, 1200, "steady")], chapters)
-        self.assertEqual(phrases[0]["chapter_idx"], 1)
-
 
 class TestBuildEnergy(unittest.TestCase):
 

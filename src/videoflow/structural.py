@@ -32,7 +32,7 @@ from typing import Callable
 
 from videoflow.audio import analyze_beats as _analyze_beats
 from videoflow.chapters import Chapter
-from videoflow.generate import classify_modes as _classify_modes
+from videoflow.phrases import Phrase, classify_phrases as _classify_phrases
 from videoflow.progress import OnProgress, ProgressReporter
 from videoflow.sidecar import write_sidecar as _write_sidecar
 
@@ -162,7 +162,7 @@ def auto_chapter(
 
     chapters: list[Chapter] = []
     beat_map = None
-    phrase_modes: list[tuple[int, int, str]] = []
+    phrases: list[Phrase] = []
 
     with reporter.stage("structural.auto_chapter"):
         with reporter.stage("extract"):
@@ -213,9 +213,9 @@ def auto_chapter(
                 )
 
             with reporter.stage("classify"):
-                phrase_modes = _classify_modes(beat_map, chapters=chapters)
+                phrases = _classify_phrases(beat_map, chapters=chapters)
                 reporter.complete(
-                    summary=f"{len(phrase_modes)} phrases classified",
+                    summary=f"{len(phrases)} phrases classified",
                 )
         finally:
             if _tmp is not None:
@@ -225,7 +225,7 @@ def auto_chapter(
             with reporter.stage("sidecar"):
                 payload: dict = {
                     "chapters": [c.to_dict() for c in chapters],
-                    "phrases": _build_phrases(phrase_modes, chapters),
+                    "phrases": [p.to_dict() for p in phrases],
                     "generated_by": {
                         "tool": "videoflow.structural",
                         "tool_version": _videoflow_version(),
@@ -574,46 +574,9 @@ def _classify_content(y, sr: int) -> tuple[str, float, list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Phrase + energy payload builders (consumed by write_sidecar in auto_chapter)
+# Energy payload builder (consumed by write_sidecar in auto_chapter).
+# Phrase building lives in videoflow.phrases as part of classify_phrases.
 # ---------------------------------------------------------------------------
-
-def _build_phrases(
-    phrase_modes: list[tuple[int, int, str]],
-    chapters: list[Chapter],
-) -> list[dict]:
-    """Convert classify_modes output into sidecar phrase records.
-
-    Each phrase's ``chapter_idx`` is derived from its centre timestamp
-    rather than its start, so a phrase that straddles a chapter boundary
-    is attributed to the chapter where most of it lives.
-    """
-    out: list[dict] = []
-    for start_ms, end_ms, mode in phrase_modes:
-        centre_ms = (int(start_ms) + int(end_ms)) // 2
-        out.append({
-            "chapter_idx": _chapter_index_at(centre_ms, chapters),
-            "at_ms": int(start_ms),
-            "end_ms": int(end_ms),
-            "mode": mode or "",
-            "auto_generated": True,
-        })
-    return out
-
-
-def _chapter_index_at(time_ms: int, chapters: list[Chapter]) -> int:
-    """Return the index of the chapter containing *time_ms*.
-
-    Falls back to the last chapter for times beyond the final chapter's
-    end (defensive — real audio rarely produces phrases past duration).
-    Returns 0 when *chapters* is empty (caller's responsibility to
-    avoid; auto_chapter always produces at least one).
-    """
-    for i, ch in enumerate(chapters):
-        ch_end = ch.end_ms if ch.end_ms is not None else 1 << 62
-        if ch.at_ms <= time_ms < ch_end:
-            return i
-    return max(0, len(chapters) - 1)
-
 
 def _build_energy(beat_map, chapters: list[Chapter]) -> dict:
     """Build the sidecar ``energy`` block from a chapter-aware AudioBeatMap.
