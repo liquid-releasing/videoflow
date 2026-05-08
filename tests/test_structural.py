@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -11,11 +10,9 @@ from unittest.mock import patch
 import numpy as np
 import soundfile as sf
 
-from videoflow.chapters import Chapter
 from videoflow.structural import (
     AutoChapterError,
     _classify_content,
-    _maybe_write_sidecar,
     _merge_micro_chapters,
     _segment_boundaries,
     _silence_breakpoints,
@@ -222,94 +219,8 @@ class TestClassifyContent(unittest.TestCase):
         self.assertEqual(confidence, 0.0)
 
 
-# ---------------------------------------------------------------------------
-# Sidecar persistence
-# ---------------------------------------------------------------------------
-
-class TestSidecarPersistence(unittest.TestCase):
-
-    def _make_chapters(self) -> list[Chapter]:
-        return [
-            Chapter(
-                at_ms=0, end_ms=300_000,
-                content_type="music", confidence=0.85,
-                evidence=["rms_variance", "percussive_ratio"],
-            ),
-            Chapter(
-                at_ms=300_000, end_ms=600_000,
-                content_type="ambient", confidence=0.72,
-                evidence=["rms_variance"],
-            ),
-        ]
-
-    def test_writes_sidecar_when_absent(self):
-        with TemporaryDirectory() as td:
-            media = Path(td) / "track.mp4"
-            media.touch()
-            path = _maybe_write_sidecar(
-                media, self._make_chapters(), target_minutes=5.5, force=False,
-            )
-            self.assertIsNotNone(path)
-            self.assertEqual(path.name, "track.chapters.json")
-            doc = json.loads(path.read_text(encoding="utf-8"))
-            self.assertTrue(doc["auto_generated"])
-            self.assertEqual(doc["version"], "1.0")
-            self.assertEqual(len(doc["chapters"]), 2)
-            self.assertEqual(doc["chapters"][0]["content_type"], "music")
-            self.assertEqual(doc["generated_by"]["target_minutes"], 5.5)
-
-    def test_skips_when_sidecar_exists_and_not_forced(self):
-        with TemporaryDirectory() as td:
-            media = Path(td) / "track.mp4"
-            media.touch()
-            sidecar = media.with_name("track.chapters.json")
-            sidecar.write_text('{"version":"1.0","chapters":[]}', encoding="utf-8")
-            result = _maybe_write_sidecar(
-                media, self._make_chapters(), target_minutes=5.5, force=False,
-            )
-            self.assertIsNone(result)
-            # Original content preserved
-            self.assertEqual(
-                json.loads(sidecar.read_text())["chapters"], [],
-            )
-
-    def test_force_overwrites_auto_generated_sidecar(self):
-        with TemporaryDirectory() as td:
-            media = Path(td) / "track.mp4"
-            media.touch()
-            sidecar = media.with_name("track.chapters.json")
-            sidecar.write_text(
-                json.dumps({"version": "1.0", "auto_generated": True, "chapters": []}),
-                encoding="utf-8",
-            )
-            result = _maybe_write_sidecar(
-                media, self._make_chapters(), target_minutes=5.5, force=True,
-            )
-            self.assertIsNotNone(result)
-            doc = json.loads(sidecar.read_text())
-            self.assertEqual(len(doc["chapters"]), 2)
-
-    def test_force_refuses_to_clobber_user_edited_sidecar(self):
-        """auto_generated:false marks user-edited; force=True still respects it."""
-        with TemporaryDirectory() as td:
-            media = Path(td) / "track.mp4"
-            media.touch()
-            sidecar = media.with_name("track.chapters.json")
-            user_edited = {
-                "version": "1.0",
-                "auto_generated": False,
-                "chapters": [{"at_ms": 0, "name": "user-named"}],
-            }
-            sidecar.write_text(json.dumps(user_edited), encoding="utf-8")
-            result = _maybe_write_sidecar(
-                media, self._make_chapters(), target_minutes=5.5, force=True,
-            )
-            self.assertIsNone(result)
-            # User edit preserved
-            self.assertEqual(
-                json.loads(sidecar.read_text())["chapters"][0]["name"],
-                "user-named",
-            )
+# Sidecar persistence is now videoflow.sidecar.write_sidecar's responsibility;
+# see tests/test_sidecar.py for read / write / merge coverage.
 
 
 if __name__ == "__main__":

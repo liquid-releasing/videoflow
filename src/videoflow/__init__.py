@@ -29,6 +29,13 @@ from videoflow.progress import (
     StageEvent,
     adapt_string_callback,
 )
+from videoflow.sidecar import (
+    SidecarError,
+    chapters_from_sidecar,
+    read_sidecar,
+    sidecar_path_for,
+    write_sidecar,
+)
 from videoflow.structural import AutoChapterError, auto_chapter
 
 __all__ = [
@@ -56,4 +63,9 @@ __all__ = [
     "ProgressReporter",
     "StageEvent",
     "adapt_string_callback",
+    "SidecarError",
+    "chapters_from_sidecar",
+    "read_sidecar",
+    "sidecar_path_for",
+    "write_sidecar",
 ]

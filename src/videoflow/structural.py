@@ -24,16 +24,15 @@ Example::
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 from videoflow.chapters import Chapter
 from videoflow.progress import OnProgress, ProgressReporter
+from videoflow.sidecar import write_sidecar as _write_sidecar
 
 _VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -74,8 +73,6 @@ _SILENCE_MIN_DURATION_S = 1.5
 # Snap each agglomerative-clustering boundary to the nearest silence
 # region within this radius. Keeps boundaries on natural transitions.
 _BOUNDARY_SNAP_RADIUS_S = 8.0
-
-_SCHEMA_VERSION = "1.0"
 
 
 class AutoChapterError(RuntimeError):
@@ -118,15 +115,15 @@ def auto_chapter(
             progresses (e.g. ``"Loading audio (librosa)…"``). Errors
             in the callback are swallowed — progress UI never breaks
             the analysis.
-        write_sidecar: When ``True`` (default), writes the result to
-            ``<stem>.chapters.json`` next to *media*. Skipped silently
-            if the sidecar already exists and ``force`` is ``False``,
-            so a user's hand-edited sidecar isn't overwritten.
-        force: When ``True``, overwrite an existing sidecar. Use
-            ``True`` only when the caller is explicitly regenerating
-            (e.g. forgegen's `Re-detect chapters` action — but
-            forgegen doesn't have one yet, since it's the easy
-            button; this flag is for downstream editors).
+        write_sidecar: When ``True`` (default), merges the result into
+            ``<stem>.chapters.json`` next to *media* via
+            :func:`videoflow.sidecar.write_sidecar` in ``analyze`` mode.
+            User edits are preserved per-record through the field-level
+            merge contract — see
+            ``docs/architecture/audio-structure-primitive.md``.
+        force: Deprecated. Retained for back-compat with v0.0.4 callers.
+            The merge model in :mod:`videoflow.sidecar` preserves user
+            data automatically, so this flag is a no-op as of v0.0.5.
         sr: Sample rate for analysis. 22050 is the librosa standard
             for beat / structure work; lower values speed analysis on
             multi-hour files at the cost of fine-grain resolution.
@@ -199,16 +196,22 @@ def auto_chapter(
 
         if write_sidecar:
             with reporter.stage("sidecar"):
-                wrote = _maybe_write_sidecar(
-                    media_path, chapters,
-                    target_minutes=target_minutes, force=force,
+                payload = {
+                    "chapters": [c.to_dict() for c in chapters],
+                    "generated_by": {
+                        "tool": "videoflow.structural",
+                        "tool_version": _videoflow_version(),
+                        "target_minutes": target_minutes,
+                    },
+                }
+                _write_sidecar(
+                    media_path, payload,
+                    writer="videoflow.structural",
+                    writer_version=_videoflow_version(),
+                    mode="analyze",
                 )
                 reporter.complete(
-                    summary=(
-                        f"sidecar written: {len(chapters)} chapters"
-                        if wrote else
-                        "sidecar exists — preserved"
-                    ),
+                    summary=f"sidecar merged: {len(chapters)} chapters",
                 )
 
         reporter.complete(summary=f"{len(chapters)} chapters")
@@ -538,62 +541,8 @@ def _classify_content(y, sr: int) -> tuple[str, float, list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Sidecar
+# Version helper (sidecar IO migrated to videoflow.sidecar in 0.0.5)
 # ---------------------------------------------------------------------------
-
-def _utc_now_iso() -> str:
-    return (
-        datetime.now(timezone.utc)
-        .isoformat(timespec="seconds")
-        .replace("+00:00", "Z")
-    )
-
-
-def _maybe_write_sidecar(
-    media_path: Path,
-    chapters: list[Chapter],
-    *,
-    target_minutes: float,
-    force: bool,
-) -> Path | None:
-    """Write ``<stem>.chapters.json`` unless one already exists and ``force`` is False.
-
-    The sidecar carries an ``auto_generated: true`` marker so a future
-    regenerator can tell hand-edited from auto-detected. User edits in
-    forgeassembler / FunscriptForge clear that marker (or set it to
-    ``false``), preserving their changes from accidental overwrite even
-    when ``force=True`` is passed somewhere up the stack.
-    """
-    sidecar_path = media_path.with_name(media_path.stem + ".chapters.json")
-    if sidecar_path.exists() and not force:
-        return None
-
-    if sidecar_path.exists() and force:
-        # Even with force=True, refuse to clobber a user-edited sidecar.
-        try:
-            existing = json.loads(sidecar_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            existing = None
-        if isinstance(existing, dict) and existing.get("auto_generated") is False:
-            return None
-
-    payload = {
-        "version": _SCHEMA_VERSION,
-        "auto_generated": True,
-        "generated_by": {
-            "tool": "videoflow.structural",
-            "tool_version": _videoflow_version(),
-            "generated_at": _utc_now_iso(),
-            "target_minutes": target_minutes,
-        },
-        "chapters": [c.to_dict() for c in chapters],
-    }
-    sidecar_path.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    return sidecar_path
-
 
 def _videoflow_version() -> str:
     try:
