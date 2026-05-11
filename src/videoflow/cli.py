@@ -207,11 +207,19 @@ def cmd_analyze_beats(args: argparse.Namespace) -> int:
 def cmd_auto_chapter(args: argparse.Namespace) -> int:
     from videoflow.structural import AutoChapterError, auto_chapter
 
+    # Stream stage labels to stderr with a parseable `progress: ` prefix.
+    # Forgegen's Tauri bridge tails stderr line-by-line and emits each
+    # match as a Tauri event so the React UI shows live per-stage status.
+    # The prefix avoids conflating with ffmpeg / librosa native warnings.
+    def _progress(label: str) -> None:
+        print(f"progress: {label}", file=sys.stderr, flush=True)
+
     try:
         chapters = auto_chapter(
             args.input,
             target_minutes=args.target_minutes,
             write_sidecar=not args.no_sidecar,
+            progress_callback=_progress,
         )
     except FileNotFoundError as exc:
         _err(str(exc), args.human)
