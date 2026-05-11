@@ -4,8 +4,45 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Progress emission — writes to stderr AND optional side-channel file
+# ---------------------------------------------------------------------------
+#
+# Direct CLI use: stderr captures the progress lines as `progress: <label>`.
+# Forgegen's Tauri bridge can't read stderr reliably (Tokio's stdio piping
+# on Windows doesn't forward Python's stderr), so when VIDEOFLOW_PROGRESS_FILE
+# is set the same lines also append to that file. The bridge polls the file
+# for live UI updates.
+
+_PROGRESS_FILE_HANDLE = None  # None=not initialized, False=disabled, fileobj=open
+
+def _emit_progress(label: str) -> None:
+    """Emit a stage label to stderr (parseable `progress: ` prefix) and,
+    when VIDEOFLOW_PROGRESS_FILE env var is set, append the same line to
+    that file. Errors are swallowed — progress reporting never breaks
+    the underlying analysis."""
+    print(f"progress: {label}", file=sys.stderr, flush=True)
+    global _PROGRESS_FILE_HANDLE
+    if _PROGRESS_FILE_HANDLE is None:
+        path = os.environ.get("VIDEOFLOW_PROGRESS_FILE")
+        if path:
+            try:
+                _PROGRESS_FILE_HANDLE = open(path, "a", encoding="utf-8")
+            except OSError:
+                _PROGRESS_FILE_HANDLE = False
+        else:
+            _PROGRESS_FILE_HANDLE = False
+    if _PROGRESS_FILE_HANDLE not in (None, False):
+        try:
+            _PROGRESS_FILE_HANDLE.write(f"progress: {label}\n")
+            _PROGRESS_FILE_HANDLE.flush()
+        except OSError:
+            pass
 
 
 def _out(data: dict, human: bool) -> None:
@@ -207,19 +244,12 @@ def cmd_analyze_beats(args: argparse.Namespace) -> int:
 def cmd_auto_chapter(args: argparse.Namespace) -> int:
     from videoflow.structural import AutoChapterError, auto_chapter
 
-    # Stream stage labels to stderr with a parseable `progress: ` prefix.
-    # Forgegen's Tauri bridge tails stderr line-by-line and emits each
-    # match as a Tauri event so the React UI shows live per-stage status.
-    # The prefix avoids conflating with ffmpeg / librosa native warnings.
-    def _progress(label: str) -> None:
-        print(f"progress: {label}", file=sys.stderr, flush=True)
-
     try:
         chapters = auto_chapter(
             args.input,
             target_minutes=args.target_minutes,
             write_sidecar=not args.no_sidecar,
-            progress_callback=_progress,
+            progress_callback=_emit_progress,
         )
     except FileNotFoundError as exc:
         _err(str(exc), args.human)
@@ -266,12 +296,6 @@ def cmd_auto_chapter(args: argparse.Namespace) -> int:
 def cmd_generate_funscript(args: argparse.Namespace) -> int:
     from videoflow.generate import GenerateError, generate_from_beats
 
-    # Mirror cmd_auto_chapter: stream stage labels to stderr with the
-    # parseable `progress: ` prefix so forgegen's Tauri bridge can emit
-    # them as events for live UI feedback.
-    def _progress(label: str) -> None:
-        print(f"progress: {label}", file=sys.stderr, flush=True)
-
     input_path = Path(args.input)
 
     # Accept either a saved beat-map JSON or an audio/video file
@@ -293,7 +317,7 @@ def cmd_generate_funscript(args: argparse.Namespace) -> int:
                 source=args.source,
                 tracker=args.tracker,
                 locked_bpm=args.locked_bpm,
-                progress_callback=_progress,
+                progress_callback=_emit_progress,
             )
         except FileNotFoundError as exc:
             _err(str(exc), args.human)
@@ -327,7 +351,7 @@ def cmd_generate_funscript(args: argparse.Namespace) -> int:
             energy_normalize=args.energy_normalize,
             stroke_density=args.stroke_density,
             title=args.title or "",
-            progress_callback=_progress,
+            progress_callback=_emit_progress,
         )
     except GenerateError as exc:
         _err(str(exc), args.human)
