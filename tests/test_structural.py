@@ -235,10 +235,11 @@ class TestClassifyContent(unittest.TestCase):
 class TestBuildEnergy(unittest.TestCase):
 
     class _FakeBeatMap:
-        def __init__(self, beats, energy, duration_ms):
+        def __init__(self, beats, energy, duration_ms, downbeats=None):
             self.beats = beats
             self.energy = energy
             self.duration_ms = duration_ms
+            self.downbeats = list(downbeats) if downbeats is not None else []
 
     def test_emits_percentiles_and_beat_map(self):
         bm = self._FakeBeatMap(
@@ -253,6 +254,21 @@ class TestBuildEnergy(unittest.TestCase):
             self.assertIn(key, energy["percentiles"])
         self.assertEqual(energy["beat_map"]["times_ms"], [0, 500, 1000, 1500, 2000])
         self.assertEqual(len(energy["beat_map"]["strengths"]), 5)
+        self.assertEqual(energy["beat_map"]["is_downbeat"], [False] * 5)
+
+    def test_beat_map_marks_downbeats(self):
+        bm = self._FakeBeatMap(
+            beats=[0, 500, 1000, 1500, 2000, 2500, 3000, 3500],
+            energy=[0.5] * 8,
+            duration_ms=4000,
+            downbeats=[0, 2000],  # every 4th beat in 4/4
+        )
+        chapters = [Chapter(at_ms=0, end_ms=4000, content_type="music")]
+        energy = _build_energy(bm, chapters)
+        self.assertEqual(
+            energy["beat_map"]["is_downbeat"],
+            [True, False, False, False, True, False, False, False],
+        )
 
     def test_per_chapter_block_has_bpm_and_content_type(self):
         bm = self._FakeBeatMap(

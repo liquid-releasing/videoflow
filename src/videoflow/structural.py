@@ -581,16 +581,19 @@ def _classify_content(y, sr: int) -> tuple[str, float, list[str]]:
 def _build_energy(beat_map, chapters: list[Chapter]) -> dict:
     """Build the sidecar ``energy`` block from a chapter-aware AudioBeatMap.
 
-    Emits whole-file ``percentiles``, the inline ``beat_map`` (times +
-    strengths), and a ``per_chapter`` map keyed by chapter index with
-    its own percentile statistics, BPM derived from beat density in the
-    chapter window, and content_type when present.
+    Emits whole-file ``percentiles``, the inline ``beat_map`` (times,
+    strengths, and per-beat ``is_downbeat`` flags so downstream tools
+    can phase-lock without re-analysing audio), and a ``per_chapter``
+    map keyed by chapter index with its own percentile statistics, BPM
+    derived from beat density in the chapter window, and content_type
+    when present.
 
     The ``envelope`` field (sampled RMS over time) is not produced here
     — videoflow.audio doesn't expose it. Schema permits absence.
     """
     energies = list(beat_map.energy)
     beats_ms = list(beat_map.beats)
+    downbeats_ms = list(getattr(beat_map, "downbeats", None) or [])
     duration_ms = int(beat_map.duration_ms)
 
     out: dict = {}
@@ -603,9 +606,11 @@ def _build_energy(beat_map, chapters: list[Chapter]) -> dict:
         }
 
     if beats_ms:
+        downbeats_set = {int(t) for t in downbeats_ms}
         out["beat_map"] = {
             "times_ms": [int(t) for t in beats_ms],
             "strengths": [round(float(e), 6) for e in energies],
+            "is_downbeat": [int(t) in downbeats_set for t in beats_ms],
         }
 
     per_chapter: dict[str, dict] = {}

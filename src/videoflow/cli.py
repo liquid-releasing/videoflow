@@ -24,6 +24,21 @@ def _err(message: str, human: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
+# patterns-list
+# ---------------------------------------------------------------------------
+
+def cmd_patterns_list(args: argparse.Namespace) -> int:
+    from videoflow.patterns import CATALOG, to_json
+
+    if args.human:
+        for p in CATALOG:
+            print(f"{p.id:14}  {p.label:10}  {p.summary}")
+    else:
+        print(to_json(indent=2 if args.pretty else None))
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # detect-scenes
 # ---------------------------------------------------------------------------
 
@@ -362,6 +377,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub = parser.add_subparsers(dest="command", required=True)
+
+    # patterns-list — modulation library catalog (haptics / stim / multi-axis / edit)
+    p_patterns = sub.add_parser(
+        "patterns-list",
+        help="List the pattern catalog (modulation vocabulary across consumers).",
+    )
+    p_patterns.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON output with indentation.",
+    )
+    p_patterns.set_defaults(func=cmd_patterns_list)
 
     # detect-scenes
     p_scenes = sub.add_parser(
