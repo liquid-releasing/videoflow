@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Callable
 
 from videoflow.audio import AudioBeatMap
 
@@ -510,6 +511,7 @@ def generate_from_beats(
     stroke_density: object = "half",
     title: str = "",
     on_progress: "OnProgress | None" = None,
+    progress_callback: "Callable[[str], None] | None" = None,
 ) -> Path:
     """Full pipeline: :class:`~videoflow.audio.AudioBeatMap` → ``.funscript``.
 
@@ -541,9 +543,17 @@ def generate_from_beats(
     """
     from videoflow.progress import ProgressReporter
 
+    def _progress(label: str) -> None:
+        if progress_callback is not None:
+            try:
+                progress_callback(label)
+            except Exception:
+                pass
+
     reporter = ProgressReporter(on_progress)
     with reporter.stage("generate"):
         with reporter.stage("curve"):
+            _progress("Generating motion curve…")
             curve = beats_to_curve(
                 beat_map,
                 low=low, high=high, center=center,
@@ -555,10 +565,12 @@ def generate_from_beats(
             reporter.complete(summary=f"{len(curve)} curve points")
 
         with reporter.stage("classify"):
+            _progress("Classifying phrase modes…")
             modes = classify_modes(beat_map)
             reporter.complete(summary=f"{len(modes)} mode segments")
 
         with reporter.stage("shape"):
+            _progress("Shaping curve per mode…")
             shaped = shape_curve(
                 curve, modes,
                 low=low, center=center,
@@ -568,6 +580,7 @@ def generate_from_beats(
             reporter.complete(summary=f"{len(shaped)} actions shaped")
 
         with reporter.stage("export"):
+            _progress("Writing funscript…")
             path = export_funscript(shaped, output, title=title)
             reporter.complete(summary=f"wrote {path.name}")
 

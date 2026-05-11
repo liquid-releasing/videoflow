@@ -266,6 +266,12 @@ def cmd_auto_chapter(args: argparse.Namespace) -> int:
 def cmd_generate_funscript(args: argparse.Namespace) -> int:
     from videoflow.generate import GenerateError, generate_from_beats
 
+    # Mirror cmd_auto_chapter: stream stage labels to stderr with the
+    # parseable `progress: ` prefix so forgegen's Tauri bridge can emit
+    # them as events for live UI feedback.
+    def _progress(label: str) -> None:
+        print(f"progress: {label}", file=sys.stderr, flush=True)
+
     input_path = Path(args.input)
 
     # Accept either a saved beat-map JSON or an audio/video file
@@ -287,6 +293,7 @@ def cmd_generate_funscript(args: argparse.Namespace) -> int:
                 source=args.source,
                 tracker=args.tracker,
                 locked_bpm=args.locked_bpm,
+                progress_callback=_progress,
             )
         except FileNotFoundError as exc:
             _err(str(exc), args.human)
@@ -320,6 +327,7 @@ def cmd_generate_funscript(args: argparse.Namespace) -> int:
             energy_normalize=args.energy_normalize,
             stroke_density=args.stroke_density,
             title=args.title or "",
+            progress_callback=_progress,
         )
     except GenerateError as exc:
         _err(str(exc), args.human)
