@@ -213,6 +213,7 @@ def auto_chapter(
                 )
 
             with reporter.stage("classify"):
+                _progress("Classifying phrases…")
                 phrases = _classify_phrases(beat_map, chapters=chapters)
                 reporter.complete(
                     summary=f"{len(phrases)} phrases classified",
@@ -223,6 +224,7 @@ def auto_chapter(
 
         if write_sidecar:
             with reporter.stage("sidecar"):
+                _progress("Writing sidecar…")
                 payload: dict = {
                     "chapters": [c.to_dict() for c in chapters],
                     "phrases": [p.to_dict() for p in phrases],
