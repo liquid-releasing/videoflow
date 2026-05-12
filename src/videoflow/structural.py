@@ -288,17 +288,12 @@ def _prepare_audio(
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     tmp.close()
     try:
-        subprocess.run(
-            [
-                ffmpeg, "-y", "-i", str(media_path),
-                "-vn", "-ar", str(sr), "-ac", "1",
-                "-f", "wav", tmp.name,
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=_NO_WINDOW,
+        rc = _run_ffmpeg_with_progress(
+            ffmpeg, media_path, tmp.name, sr=sr, progress=progress,
         )
+        if rc != 0:
+            Path(tmp.name).unlink(missing_ok=True)
+            raise AutoChapterError(f"FFmpeg audio extraction failed (exit {rc})")
     except FileNotFoundError:
         Path(tmp.name).unlink(missing_ok=True)
         raise AutoChapterError(
@@ -306,10 +301,99 @@ def _prepare_audio(
             "Install it from https://ffmpeg.org/download.html — "
             "or place ffmpeg.exe alongside videoflow."
         )
-    except subprocess.CalledProcessError as exc:
-        Path(tmp.name).unlink(missing_ok=True)
-        raise AutoChapterError(f"FFmpeg audio extraction failed: {exc}") from exc
     return tmp.name, tmp.name
+
+
+def _format_extract_timestamp(out_time_us: int) -> str:
+    """Format ffmpeg's ``out_time_us`` (microseconds of decoded audio) as
+    ``m:ss`` or ``h:mm:ss``. Negative or invalid values clamp to zero."""
+    seconds = max(0, out_time_us // 1_000_000)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def _parse_ffmpeg_progress_line(line: str) -> str | None:
+    """Return a Stepper-friendly progress label for one ffmpeg ``-progress``
+    line, or None if the line carries no decode-position info we can show."""
+    line = line.strip()
+    if not line.startswith("out_time_us="):
+        return None
+    try:
+        us = int(line.split("=", 1)[1])
+    except ValueError:
+        return None
+    return f"Extracting audio… {_format_extract_timestamp(us)} done"
+
+
+def _run_ffmpeg_with_progress(
+    ffmpeg: str,
+    media_path: Path,
+    out_path: str,
+    *,
+    sr: int,
+    progress: Callable[[str], None],
+) -> int:
+    """Run ffmpeg → mono WAV, emitting sub-stage progress lines like
+    ``Extracting audio… 0:23 done`` while it works. Returns the exit code.
+
+    Uses ``-progress <file>`` rather than ``-progress pipe:1`` because
+    ffmpeg only block-flushes stdout pipes on exit (verified — pipe-mode
+    delivers nothing until the process closes), whereas the file path
+    flushes incrementally as expected. A background thread polls the
+    file every 500 ms and streams new lines through ``progress``."""
+    import os
+    import threading
+    import time
+
+    fd, progress_path = tempfile.mkstemp(suffix=".log", prefix="vfprog_")
+    os.close(fd)
+
+    proc = subprocess.Popen(
+        [
+            ffmpeg, "-y", "-i", str(media_path),
+            "-vn", "-ar", str(sr), "-ac", "1",
+            "-f", "wav",
+            "-progress", progress_path, "-nostats",
+            out_path,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=_NO_WINDOW,
+    )
+
+    stop = threading.Event()
+    last_label: list[str | None] = [None]
+
+    def _drain_once() -> None:
+        try:
+            text = Path(progress_path).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return
+        for raw in text.splitlines():
+            label = _parse_ffmpeg_progress_line(raw)
+            if label and label != last_label[0]:
+                last_label[0] = label
+                progress(label)
+
+    def _poll() -> None:
+        while not stop.wait(0.5):
+            _drain_once()
+
+    poll_thread = threading.Thread(target=_poll, daemon=True)
+    poll_thread.start()
+    try:
+        rc = proc.wait()
+    finally:
+        stop.set()
+        poll_thread.join(timeout=2.0)
+        # Final drain catches anything written between the last poll and exit.
+        _drain_once()
+        try:
+            Path(progress_path).unlink()
+        except OSError:
+            pass
+    return rc
 
 
 # ---------------------------------------------------------------------------

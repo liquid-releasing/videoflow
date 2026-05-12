@@ -338,17 +338,17 @@ def analyze_beats(
                 _tmp_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
                 _tmp_audio.close()
                 try:
-                    subprocess.run(
-                        [
-                            _ffmpeg, "-y", "-i", str(input),
-                            "-vn", "-ar", str(sr), "-ac", "1",
-                            "-f", "wav", _tmp_audio.name,
-                        ],
-                        check=True,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        creationflags=_NO_WINDOW,
+                    # Lazy import to avoid hoisting structural's heavy deps
+                    # (numpy, librosa transitively) into audio.py's import
+                    # graph for the non-extracting code paths.
+                    from videoflow.structural import _run_ffmpeg_with_progress
+                    _rc = _run_ffmpeg_with_progress(
+                        _ffmpeg, input, _tmp_audio.name,
+                        sr=sr, progress=_progress,
                     )
+                    if _rc != 0:
+                        Path(_tmp_audio.name).unlink(missing_ok=True)
+                        raise BeatError(f"FFmpeg audio extraction failed (exit {_rc})")
                 except FileNotFoundError:
                     Path(_tmp_audio.name).unlink(missing_ok=True)
                     raise BeatError(
@@ -356,9 +356,6 @@ def analyze_beats(
                         "Install it from https://ffmpeg.org/download.html — "
                         "or place ffmpeg.exe in the forgegen folder."
                     )
-                except subprocess.CalledProcessError as exc:
-                    Path(_tmp_audio.name).unlink(missing_ok=True)
-                    raise BeatError(f"FFmpeg audio extraction failed: {exc}") from exc
                 load_path = _tmp_audio.name
                 reporter.complete(summary="audio extracted to wav")
         else:

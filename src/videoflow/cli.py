@@ -19,30 +19,33 @@ from pathlib import Path
 # is set the same lines also append to that file. The bridge polls the file
 # for live UI updates.
 
-_PROGRESS_FILE_HANDLE = None  # None=not initialized, False=disabled, fileobj=open
-
 def _emit_progress(label: str) -> None:
     """Emit a stage label to stderr (parseable `progress: ` prefix) and,
     when VIDEOFLOW_PROGRESS_FILE env var is set, append the same line to
     that file. Errors are swallowed — progress reporting never breaks
-    the underlying analysis."""
-    print(f"progress: {label}", file=sys.stderr, flush=True)
-    global _PROGRESS_FILE_HANDLE
-    if _PROGRESS_FILE_HANDLE is None:
-        path = os.environ.get("VIDEOFLOW_PROGRESS_FILE")
-        if path:
-            try:
-                _PROGRESS_FILE_HANDLE = open(path, "a", encoding="utf-8")
-            except OSError:
-                _PROGRESS_FILE_HANDLE = False
-        else:
-            _PROGRESS_FILE_HANDLE = False
-    if _PROGRESS_FILE_HANDLE not in (None, False):
-        try:
-            _PROGRESS_FILE_HANDLE.write(f"progress: {label}\n")
-            _PROGRESS_FILE_HANDLE.flush()
-        except OSError:
-            pass
+    the underlying analysis.
+
+    The side-channel file is opened+written+closed per call rather than
+    held open across emits. On Windows, GetFileSize for another process
+    (forgegen's Rust polling task) lags until the writing handle closes,
+    so a long-lived handle hides updates from the poller. Open-per-emit
+    is microseconds; pipeline stages emit a handful of labels per run."""
+    try:
+        print(f"progress: {label}", file=sys.stderr, flush=True)
+    except OSError:
+        # stderr pipe broken (Tokio closes it on Windows after spawn).
+        # Without this catch, BrokenPipeError propagates and the side-
+        # channel write below never executes — only the FIRST emit landed
+        # because subsequent ones tripped on the closed pipe.
+        pass
+    path = os.environ.get("VIDEOFLOW_PROGRESS_FILE")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"progress: {label}\n")
+    except OSError:
+        pass
 
 
 def _out(data: dict, human: bool) -> None:
@@ -58,6 +61,15 @@ def _err(message: str, human: bool) -> None:
         print(f"error: {message}", file=sys.stderr)
     else:
         print(json.dumps({"error": message}), file=sys.stderr)
+    # Also surface to the side-channel so forgegen's bridge sees the
+    # failure cause — Tokio can't read python.exe's stderr on Windows.
+    path = os.environ.get("VIDEOFLOW_PROGRESS_FILE")
+    if path:
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"error: {message}\n")
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -736,4 +748,24 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    sys.exit(args.func(args))
+    try:
+        rc = args.func(args)
+    except SystemExit:
+        raise
+    except BaseException as exc:  # noqa: BLE001 — we re-raise after logging
+        # Surface uncaught exceptions to the side-channel so forgegen sees
+        # them. Python's stderr is invisible to Tokio's piped reader on
+        # Windows, so without this the only signal is a non-zero exit code.
+        import traceback
+        tb = traceback.format_exc()
+        path = os.environ.get("VIDEOFLOW_PROGRESS_FILE")
+        if path:
+            try:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(f"error: uncaught {type(exc).__name__}: {exc}\n")
+                    for line in tb.splitlines():
+                        f.write(f"error: {line}\n")
+            except OSError:
+                pass
+        raise
+    sys.exit(rc)
