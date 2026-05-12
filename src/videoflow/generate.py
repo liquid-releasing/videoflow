@@ -447,6 +447,7 @@ def export_funscript(
     *,
     title: str = "",
     range_: int = 90,
+    generated_from: dict | None = None,
 ) -> Path:
     """Write a motion curve to a ``.funscript`` file.
 
@@ -459,6 +460,28 @@ def export_funscript(
         output: Destination ``.funscript`` file path.
         title: Optional title stored in the file metadata.
         range_: ``range`` field in the funscript header. Default 90.
+        generated_from: Optional provenance block embedded in the
+            ``metadata.generated_from`` field. Lets downstream tools
+            (FunscriptForge, ForgePlayer) detect drift between the
+            funscript and a re-edited source video, render per-chapter
+            context without needing to re-load the chapters sidecar, and
+            audit which recipe was used per chapter. Conventional shape::
+
+                {
+                  "tool": "videoflow",
+                  "tool_version": "0.0.7-alpha",
+                  "source": {
+                      "path": "C:/.../track.mp4",
+                      "duration_ms": 845000,
+                      "partial_md5": "abc123…",
+                      "size_bytes": 12345678,
+                  },
+                  "chapters": [{"at_ms": 0, "end_ms": 60000}, …],
+                  "recipes": [{"source": "percussive",
+                               "stroke_density": "half",
+                               "tone": "flat",
+                               "emphasize_beats": false}, …],
+                }
 
     Returns:
         Path to the written file.
@@ -486,8 +509,13 @@ def export_funscript(
         "range": range_,
         "actions": actions,
     }
+    metadata: dict = {}
     if title:
-        data["metadata"] = {"title": title}
+        metadata["title"] = title
+    if generated_from is not None:
+        metadata["generated_from"] = generated_from
+    if metadata:
+        data["metadata"] = metadata
 
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -588,3 +616,128 @@ def generate_from_beats(
             summary=f"{len(shaped)} actions → {Path(output).name}",
         )
     return path
+
+
+# ---------------------------------------------------------------------------
+# Per-chapter generation — one recipe per chapter
+# ---------------------------------------------------------------------------
+
+def _slice_beat_map(bm: AudioBeatMap, start_ms: int, end_ms: int) -> AudioBeatMap:
+    """Return a new :class:`AudioBeatMap` restricted to ``[start_ms, end_ms)``.
+
+    Beats and energy keep their absolute timestamps so generated actions
+    line up with the source media when concatenated. Phrases that overlap
+    the window are kept intact (a phrase straddling a chapter boundary is
+    classified by whichever chapter contains its centre — that's a
+    follow-up; for now both chapters see it)."""
+    beat_indices = [i for i, b in enumerate(bm.beats) if start_ms <= b < end_ms]
+    sliced_beats = [bm.beats[i] for i in beat_indices]
+    sliced_energy = (
+        [bm.energy[i] for i in beat_indices] if bm.energy else []
+    )
+    sliced_downbeats = [d for d in bm.downbeats if start_ms <= d < end_ms]
+    sliced_phrases = [(s, e) for (s, e) in bm.phrases if e > start_ms and s < end_ms]
+    return AudioBeatMap(
+        bpm=bm.bpm,
+        beats=sliced_beats,
+        downbeats=sliced_downbeats,
+        phrases=sliced_phrases,
+        energy=sliced_energy,
+        duration_ms=max(0, end_ms - start_ms),
+    )
+
+
+def generate_from_beats_per_chapter(
+    beat_map: AudioBeatMap,
+    chapters: list[dict],
+    recipes: list[dict],
+    output: str | Path,
+    *,
+    low: int = 10,
+    high: int = 90,
+    title: str = "",
+    generated_from: dict | None = None,
+    progress_callback: "Callable[[str], None] | None" = None,
+) -> Path:
+    """Per-chapter funscript generation.
+
+    Loops chapters and runs the curve / classify / shape pipeline on a
+    sliced beat-map for each chapter with that chapter's recipe. The
+    resulting actions are concatenated (sorted by absolute time, dedup'd)
+    and written as a single funscript via :func:`export_funscript`.
+
+    ``chapters`` is the list of ``{"at_ms": int, "end_ms": int|None}``
+    entries; ``recipes`` is the parallel list of
+    ``{"source", "stroke_density", "tone", "emphasize_beats"}`` dicts.
+    Lengths must match exactly — strict by design (forgegen always sends
+    one recipe per chapter; a mismatch is a bug worth surfacing).
+
+    The ``source`` field on each recipe is informational at this layer —
+    re-running HPSS per chapter would require re-loading the audio. The
+    bridge sends the same source on every recipe (which was used at
+    analyze time); we record it in the funscript metadata regardless so
+    downstream tools see what mix the run was authored against.
+    """
+    if len(recipes) != len(chapters):
+        raise GenerateError(
+            f"recipe-bundle has {len(recipes)} recipes but {len(chapters)} "
+            f"chapters — counts must match exactly."
+        )
+
+    def _progress(label: str) -> None:
+        if progress_callback is not None:
+            try:
+                progress_callback(label)
+            except Exception:
+                pass
+
+    all_actions: list[tuple[int, int]] = []
+    for idx, (chapter, recipe) in enumerate(zip(chapters, recipes)):
+        _progress(f"Generating chapter {idx + 1}/{len(chapters)}…")
+        start_ms = int(chapter.get("at_ms", 0))
+        end_ms = chapter.get("end_ms")
+        if end_ms is None:
+            end_ms = beat_map.duration_ms
+        end_ms = int(end_ms)
+
+        sliced = _slice_beat_map(beat_map, start_ms, end_ms)
+        if not sliced.beats:
+            continue  # no beats in this chapter window — silent skip
+
+        # Resolve tone for this chapter's recipe.
+        traj = None
+        tone_per_phrase = None
+        tone = recipe.get("tone", "flat")
+        if tone == "rise":
+            traj = (30, 70)
+        elif tone == "fall":
+            traj = (70, 30)
+        elif tone == "auto":
+            tone_per_phrase = compute_auto_tone(sliced)
+
+        density = recipe.get("stroke_density", "half")
+
+        curve = beats_to_curve(
+            sliced,
+            low=low, high=high,
+            center_trajectory=traj,
+            tone_per_phrase=tone_per_phrase,
+            stroke_density=density,
+        )
+        modes = classify_modes(sliced)
+        shaped = shape_curve(
+            curve, modes,
+            low=low,
+            center_trajectory=traj,
+            tone_per_phrase=tone_per_phrase,
+        )
+        all_actions.extend(shaped)
+
+    if not all_actions:
+        raise GenerateError("no actions produced across any chapter")
+
+    return export_funscript(
+        all_actions, output,
+        title=title,
+        generated_from=generated_from,
+    )

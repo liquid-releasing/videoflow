@@ -48,6 +48,17 @@ def _emit_progress(label: str) -> None:
         pass
 
 
+def _videoflow_version_for_metadata() -> str:
+    """Best-effort videoflow version for funscript metadata.generated_from.
+    Mirrors structural._videoflow_version() — kept local so cli.py doesn't
+    take a top-level import on structural just for this."""
+    try:
+        from importlib.metadata import version as _v
+        return _v("videoflow")
+    except Exception:
+        return "unknown"
+
+
 def _out(data: dict, human: bool) -> None:
     if human:
         for k, v in data.items():
@@ -306,9 +317,30 @@ def cmd_auto_chapter(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_generate_funscript(args: argparse.Namespace) -> int:
-    from videoflow.generate import GenerateError, generate_from_beats
+    from videoflow.generate import (
+        GenerateError,
+        generate_from_beats,
+        generate_from_beats_per_chapter,
+    )
 
     input_path = Path(args.input)
+
+    # Determine mode early so we use the right `source` when analysing.
+    bundle = None
+    if args.recipe_bundle:
+        try:
+            bundle_text = Path(args.recipe_bundle).read_text(encoding="utf-8")
+            bundle = json.loads(bundle_text)
+        except (OSError, json.JSONDecodeError) as exc:
+            _err(f"invalid recipe-bundle {args.recipe_bundle}: {exc}", args.human)
+            return 1
+        # The first recipe's `source` defines the audio mix used at
+        # analyze time. Re-running HPSS per chapter would require
+        # re-loading audio per chapter; v1 of per-chapter recipes uses
+        # one source globally and varies stroke-density/tone per chapter.
+        recipes = bundle.get("recipes") or []
+        if recipes and isinstance(recipes[0], dict):
+            args.source = recipes[0].get("source", args.source)
 
     # Accept either a saved beat-map JSON or an audio/video file
     if input_path.suffix.lower() == ".json":
@@ -323,12 +355,25 @@ def cmd_generate_funscript(args: argparse.Namespace) -> int:
             return 1
     else:
         from videoflow.audio import BeatError, analyze_beats
+        # When a recipe-bundle is supplied, hand its chapter list to
+        # analyze_beats so beat tracking runs per-chapter (with progress
+        # per chunk) instead of one silent whole-file pass. For long
+        # files (multi-hour) the difference is "looks frozen for 30s"
+        # vs. "Analyzing chapter 7/15 (412s-619s)…" ticking by.
+        chapters_for_beats = None
+        if bundle is not None and bundle.get("chapters"):
+            from videoflow.chapters import Chapter
+            chapters_for_beats = [
+                Chapter(at_ms=int(c.get("at_ms", 0)), end_ms=c.get("end_ms"))
+                for c in bundle["chapters"]
+            ]
         try:
             beat_map = analyze_beats(
                 input_path,
                 source=args.source,
                 tracker=args.tracker,
                 locked_bpm=args.locked_bpm,
+                chapters=chapters_for_beats,
                 progress_callback=_emit_progress,
             )
         except FileNotFoundError as exc:
@@ -338,36 +383,67 @@ def cmd_generate_funscript(args: argparse.Namespace) -> int:
             _err(str(exc), args.human)
             return 1
 
-    traj = None
-    auto_tone = None
-    if args.tone == "rise":
-        traj = (30, 70)
-    elif args.tone == "fall":
-        traj = (70, 30)
-    elif args.tone == "auto":
-        from videoflow.generate import compute_auto_tone
-        auto_tone = compute_auto_tone(beat_map)
-    elif args.center_trajectory:
-        a, b = args.center_trajectory.split(",")
-        traj = (int(a), int(b))
+    # Per-chapter generation path: validates strict length, loops chapters
+    # with per-recipe stroke-density/tone, embeds full provenance in the
+    # funscript metadata so downstream tools (FFP, ForgePlayer) can detect
+    # video-edit drift and render per-chapter context without the sidecar.
+    if bundle is not None:
+        chapters = bundle.get("chapters") or []
+        recipes = bundle.get("recipes") or []
+        source_meta = bundle.get("source") or {}
+        generated_from = {
+            "tool": "videoflow",
+            "tool_version": _videoflow_version_for_metadata(),
+            "source": source_meta,
+            "chapters": chapters,
+            "recipes": recipes,
+        }
+        try:
+            output = generate_from_beats_per_chapter(
+                beat_map,
+                chapters=chapters,
+                recipes=recipes,
+                output=args.output,
+                low=args.low,
+                high=args.high,
+                title=args.title or "",
+                generated_from=generated_from,
+                progress_callback=_emit_progress,
+            )
+        except GenerateError as exc:
+            _err(str(exc), args.human)
+            return 1
+    else:
+        traj = None
+        auto_tone = None
+        if args.tone == "rise":
+            traj = (30, 70)
+        elif args.tone == "fall":
+            traj = (70, 30)
+        elif args.tone == "auto":
+            from videoflow.generate import compute_auto_tone
+            auto_tone = compute_auto_tone(beat_map)
+        elif args.center_trajectory:
+            a, b = args.center_trajectory.split(",")
+            traj = (int(a), int(b))
 
-    try:
-        output = generate_from_beats(
-            beat_map,
-            args.output,
-            low=args.low,
-            high=args.high,
-            center=args.center,
-            center_trajectory=traj,
-            tone_per_phrase=auto_tone,
-            energy_normalize=args.energy_normalize,
-            stroke_density=args.stroke_density,
-            title=args.title or "",
-            progress_callback=_emit_progress,
-        )
-    except GenerateError as exc:
-        _err(str(exc), args.human)
-        return 1
+        try:
+            output = generate_from_beats(
+                beat_map,
+                args.output,
+                low=args.low,
+                high=args.high,
+                center=args.center,
+                center_trajectory=traj,
+                tone_per_phrase=auto_tone,
+                energy_normalize=args.energy_normalize,
+                stroke_density=args.stroke_density,
+                title=args.title or "",
+                progress_callback=_emit_progress,
+            )
+        except GenerateError as exc:
+            _err(str(exc), args.human)
+            return 1
 
     data = {
         "output": str(output),
@@ -660,6 +736,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_gen.add_argument(
         "--title", default="", metavar="TEXT",
         help="Optional title stored in funscript metadata.",
+    )
+    p_gen.add_argument(
+        "--recipe-bundle",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        dest="recipe_bundle",
+        help=(
+            "Path to a JSON file with per-chapter recipes. Schema: "
+            "{version: 1, chapters: [{at_ms, end_ms}, ...], "
+            "recipes: [{source, stroke_density, tone, emphasize_beats}, ...], "
+            "source: {path, duration_ms, partial_md5, size_bytes}}. "
+            "Recipes count must equal chapters count (strict). When set, "
+            "single-recipe args (--source, --stroke-density, --tone, "
+            "--center-trajectory) are ignored except --source which is "
+            "taken from the first recipe for the analyze pass. Source mix "
+            "(percussive vs full) is still global per run; stroke-density "
+            "and tone vary per chapter."
+        ),
     )
     p_gen.set_defaults(func=cmd_generate_funscript)
 
