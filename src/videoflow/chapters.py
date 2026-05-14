@@ -481,6 +481,101 @@ def write_chapters_sidecar(
     )
 
 
+def format_youtube_description(chapters: list[Chapter]) -> str:
+    """Render *chapters* as a YouTube-description chapter block.
+
+    YouTube auto-extracts chapter markers from the video description if
+    the text follows a specific shape (rules YouTube has documented but
+    not stabilised in writing — current behaviour as of mid-2025):
+
+    1. **First chapter must start at 0:00.** Anything else and YouTube
+       refuses to treat the block as chapters at all.
+    2. **At least 3 chapter lines.** Fewer than 3 and chapters don't
+       show in the UI.
+    3. **Each chapter at least 10 seconds long.** Sub-10s segments
+       cause YouTube to drop the whole block.
+    4. **Timestamps at line start**, formatted ``M:SS``, ``MM:SS``,
+       ``H:MM:SS``, or ``HH:MM:SS``. We emit the shortest valid form
+       per line (``M:SS`` under 1h, ``H:MM:SS`` at/above 1h) — both
+       are accepted, but the shorter form reads more naturally.
+    5. **Title follows after a space.** We prefer ``name`` and fall
+       back to ``intent`` so chapters with neither still get a
+       meaningful label (``"Chapter N"``).
+
+    The returned string can be pasted directly into the YouTube
+    description box, or appended programmatically to an existing
+    description. Trailing newline included so concatenation with
+    other text doesn't collapse the final line.
+
+    Args:
+        chapters: List of :class:`Chapter` records. Must satisfy the
+            YouTube rules above.
+
+    Returns:
+        Multi-line string, one chapter per line, trailing newline.
+
+    Raises:
+        ChapterError: If the chapter list would be rejected by
+            YouTube — first chapter not at 0, fewer than 3 chapters,
+            or any chapter shorter than 10 seconds. The error message
+            names the specific rule violated so the caller can fix.
+    """
+    if len(chapters) < 3:
+        raise ChapterError(
+            f"YouTube requires at least 3 chapters to render a chapter "
+            f"block; got {len(chapters)}"
+        )
+
+    sorted_ch = sorted(chapters, key=lambda c: c.at_ms)
+    if sorted_ch[0].at_ms != 0:
+        raise ChapterError(
+            f"YouTube requires the first chapter to start at 0:00; "
+            f"got at_ms={sorted_ch[0].at_ms}. Add an intro chapter or "
+            f"shift the first chapter back to 0."
+        )
+
+    # Validate ≥10s spacing. For chapters with open-ended end_ms we
+    # compare against the next chapter's start; for the last chapter
+    # we can't verify length here (no track duration) — YouTube does
+    # that check on its end. Caller is responsible for ensuring the
+    # last chapter is also ≥10s.
+    for i in range(len(sorted_ch) - 1):
+        gap = sorted_ch[i + 1].at_ms - sorted_ch[i].at_ms
+        if gap < 10_000:
+            raise ChapterError(
+                f"YouTube requires each chapter to be at least 10 seconds "
+                f"long; chapter {i} → {i + 1} is only {gap}ms "
+                f"(at {sorted_ch[i].at_ms}ms → {sorted_ch[i + 1].at_ms}ms). "
+                f"Merge or extend the short chapter."
+            )
+
+    lines: list[str] = []
+    has_hour_chapter = sorted_ch[-1].at_ms >= 3_600_000
+    for i, ch in enumerate(sorted_ch):
+        timestamp = _format_youtube_timestamp(
+            ch.at_ms, force_hours=has_hour_chapter,
+        )
+        title = ch.name or ch.intent or f"Chapter {i + 1}"
+        lines.append(f"{timestamp} {title}")
+    return "\n".join(lines) + "\n"
+
+
+def _format_youtube_timestamp(at_ms: int, *, force_hours: bool) -> str:
+    """Render *at_ms* as a YouTube-recognised timestamp.
+
+    Without *force_hours*, returns ``M:SS`` for times under an hour
+    and ``H:MM:SS`` otherwise. With *force_hours*, always returns
+    ``H:MM:SS`` — used when the same chapter block has at least one
+    chapter past the 1h mark, so the column reads consistently.
+    """
+    total_seconds = at_ms // 1000
+    hours, rem = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if hours > 0 or force_hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
+
 def _format_ffmetadata1(chapters: list[Chapter]) -> str:
     """Render *chapters* as an FFMETADATA1 document.
 

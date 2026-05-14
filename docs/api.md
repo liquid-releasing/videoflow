@@ -227,13 +227,16 @@ Returns `None` when no source has chapters. **Principle**: hand-built chapters a
 ```python
 write_chapters_sidecar(media_path, chapters, *, writer="external")
 embed_in_mp4(input_path, output_path, chapters)
+format_youtube_description(chapters)  # returns str
 ```
 
 `write_chapters_sidecar` writes a chapter list to `<stem>.chapters.json` via the merge layer in `videoflow.sidecar`. Records land with `auto_generated: false` so subsequent analyze writers (`videoflow.structural.auto_chapter`) leave them alone. Use this for hand-authored / external-recovery workflows.
 
-`embed_in_mp4` muxes chapters into a copy of *input_path* at *output_path* using FFMETADATA1 + `ffmpeg -codec copy`. No re-encode. Round-trips hand-authored chapters back into the file itself so external tools that only read embedded markers (mpv, QuickTime, Plex) see them.
+`embed_in_mp4` muxes chapters into a copy of *input_path* at *output_path* using FFMETADATA1 + `ffmpeg -codec copy`. No re-encode. Round-trips hand-authored chapters back into the file itself so external tools that only read embedded markers (mpv, QuickTime, Plex, YouTube on upload) see them.
 
-CLI equivalents: `videoflow chapters-write-sidecar <video> <chapters.json>` and `videoflow chapters-embed <input> <output>`.
+`format_youtube_description` renders a chapter list as a pasteable YouTube-description chapter block. Validates against YouTube's rules: first chapter at 0:00, ≥3 chapters, each ≥10s long. Raises `ChapterError` with the specific rule violated if the chapters would be rejected. Emits `M:SS` under 1h, `H:MM:SS` when any chapter passes 1h.
+
+CLI equivalents: `videoflow chapters-write-sidecar <video> <chapters.json>`, `videoflow chapters-embed <input> <output>`, `videoflow chapters-to-youtube-description <video>`.
 
 ## CLI
 

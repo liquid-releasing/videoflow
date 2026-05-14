@@ -563,6 +563,59 @@ def cmd_chapters_write_sidecar(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# chapters-to-youtube-description — render the YouTube-pasteable chapter block
+# ---------------------------------------------------------------------------
+
+def cmd_chapters_to_youtube_description(args: argparse.Namespace) -> int:
+    """Print a YouTube-description chapter block to stdout.
+
+    Loads chapters via :func:`load_chapters` (sidecar wins), validates
+    them against YouTube's rules (first at 0:00, ≥3 chapters, each
+    ≥10s), and prints the pasteable block. For uploads, embedding the
+    chapters into the MP4 via ``chapters-embed`` is also valid —
+    YouTube reads embedded markers on upload — but the description-
+    text path lets the user re-edit titles after upload without re-
+    encoding.
+    """
+    from videoflow.chapters import (
+        ChapterError, format_youtube_description, load_chapters,
+    )
+
+    try:
+        chapters = load_chapters(args.input)
+    except (FileNotFoundError, ChapterError) as exc:
+        _err(str(exc), args.human)
+        return 1
+
+    if chapters is None:
+        _err(
+            f"no chapters found for {args.input} (looked at sidecar, "
+            f"embedded mp4, and analysis.json)",
+            args.human,
+        )
+        return 1
+
+    try:
+        text = format_youtube_description(chapters)
+    except ChapterError as exc:
+        _err(str(exc), args.human)
+        return 1
+
+    # The description block goes to stdout regardless of --human so the
+    # caller can pipe it straight into the clipboard / a file. JSON mode
+    # wraps it for programmatic consumers.
+    if args.human:
+        print(text, end="")
+    else:
+        print(json.dumps({
+            "input": str(args.input),
+            "chapter_count": len(chapters),
+            "description_block": text,
+        }, indent=2))
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # chapters-embed — mux a chapter set into a video via FFMETADATA1
 # ---------------------------------------------------------------------------
 
@@ -984,6 +1037,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_chwrite.set_defaults(func=cmd_chapters_write_sidecar)
+
+    # chapters-to-youtube-description — render the YouTube-pasteable block
+    p_chyt = sub.add_parser(
+        "chapters-to-youtube-description",
+        help=(
+            "Print a YouTube-description chapter block to stdout. Validates "
+            "against YouTube's rules (first at 0:00, >=3 chapters, each >=10s)."
+        ),
+    )
+    p_chyt.add_argument("input", type=Path, help="Source media file.")
+    p_chyt.set_defaults(func=cmd_chapters_to_youtube_description)
 
     # chapters-embed — mux chapters into an MP4 via ffmpeg -codec copy
     p_chembed = sub.add_parser(

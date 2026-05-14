@@ -12,7 +12,9 @@ from videoflow.chapters import (
     Chapter,
     ChapterError,
     _format_ffmetadata1,
+    _format_youtube_timestamp,
     embed_in_mp4,
+    format_youtube_description,
     load_chapters,
     read_analysis_chapters,
     read_mp4_chapters,
@@ -533,6 +535,115 @@ class TestEmbedInMp4(unittest.TestCase):
                 with self.assertRaises(ChapterError) as ctx:
                     embed_in_mp4(src, dst, [])
             self.assertIn("synthetic ffmpeg failure", str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
+# format_youtube_description / _format_youtube_timestamp
+# ---------------------------------------------------------------------------
+
+class TestYoutubeTimestamp(unittest.TestCase):
+
+    def test_under_one_hour_uses_m_ss(self):
+        self.assertEqual(_format_youtube_timestamp(0, force_hours=False), "0:00")
+        self.assertEqual(_format_youtube_timestamp(83_000, force_hours=False), "1:23")
+        self.assertEqual(_format_youtube_timestamp(3_599_000, force_hours=False), "59:59")
+
+    def test_at_or_above_one_hour_uses_h_mm_ss(self):
+        self.assertEqual(_format_youtube_timestamp(3_600_000, force_hours=False), "1:00:00")
+        self.assertEqual(_format_youtube_timestamp(5_025_000, force_hours=False), "1:23:45")
+
+    def test_force_hours_pads_minutes(self):
+        """When the block contains any 1h+ chapter, all rows render H:MM:SS."""
+        self.assertEqual(_format_youtube_timestamp(0, force_hours=True), "0:00:00")
+        self.assertEqual(_format_youtube_timestamp(83_000, force_hours=True), "0:01:23")
+
+
+class TestFormatYoutubeDescription(unittest.TestCase):
+
+    def test_valid_short_block(self):
+        text = format_youtube_description([
+            Chapter(at_ms=0, name="Intro"),
+            Chapter(at_ms=83_000, name="Topic 1"),
+            Chapter(at_ms=300_000, name="Topic 2"),
+        ])
+        lines = text.strip().splitlines()
+        self.assertEqual(lines[0], "0:00 Intro")
+        self.assertEqual(lines[1], "1:23 Topic 1")
+        self.assertEqual(lines[2], "5:00 Topic 2")
+        # trailing newline included for safe concat
+        self.assertTrue(text.endswith("\n"))
+
+    def test_validates_first_chapter_at_zero(self):
+        with self.assertRaises(ChapterError) as ctx:
+            format_youtube_description([
+                Chapter(at_ms=1000, name="Late start"),
+                Chapter(at_ms=20_000, name="Two"),
+                Chapter(at_ms=40_000, name="Three"),
+            ])
+        self.assertIn("0:00", str(ctx.exception))
+
+    def test_validates_minimum_three_chapters(self):
+        with self.assertRaises(ChapterError) as ctx:
+            format_youtube_description([
+                Chapter(at_ms=0, name="A"),
+                Chapter(at_ms=20_000, name="B"),
+            ])
+        self.assertIn("at least 3", str(ctx.exception))
+
+    def test_validates_ten_second_minimum(self):
+        with self.assertRaises(ChapterError) as ctx:
+            format_youtube_description([
+                Chapter(at_ms=0, name="Intro"),
+                Chapter(at_ms=5_000, name="Too soon"),  # only 5s gap
+                Chapter(at_ms=20_000, name="Three"),
+            ])
+        self.assertIn("10 seconds", str(ctx.exception))
+
+    def test_hour_chapter_forces_h_mm_ss_throughout(self):
+        text = format_youtube_description([
+            Chapter(at_ms=0, name="Intro"),
+            Chapter(at_ms=1_800_000, name="Middle"),
+            Chapter(at_ms=3_700_000, name="Bonus"),
+        ])
+        lines = text.strip().splitlines()
+        # All three should be H:MM:SS because the last one is past 1h.
+        self.assertEqual(lines[0], "0:00:00 Intro")
+        self.assertEqual(lines[1], "0:30:00 Middle")
+        self.assertEqual(lines[2], "1:01:40 Bonus")
+
+    def test_title_falls_back_to_intent(self):
+        text = format_youtube_description([
+            Chapter(at_ms=0, intent="intro"),
+            Chapter(at_ms=20_000, intent="build"),
+            Chapter(at_ms=40_000, intent="climax"),
+        ])
+        lines = text.strip().splitlines()
+        self.assertIn("intro", lines[0])
+        self.assertIn("build", lines[1])
+        self.assertIn("climax", lines[2])
+
+    def test_title_falls_back_to_chapter_n(self):
+        text = format_youtube_description([
+            Chapter(at_ms=0),
+            Chapter(at_ms=20_000),
+            Chapter(at_ms=40_000),
+        ])
+        lines = text.strip().splitlines()
+        self.assertEqual(lines[0], "0:00 Chapter 1")
+        self.assertEqual(lines[1], "0:20 Chapter 2")
+        self.assertEqual(lines[2], "0:40 Chapter 3")
+
+    def test_handles_unsorted_input(self):
+        """Caller may pass chapters in any order; formatter sorts."""
+        text = format_youtube_description([
+            Chapter(at_ms=40_000, name="Last"),
+            Chapter(at_ms=0, name="First"),
+            Chapter(at_ms=20_000, name="Middle"),
+        ])
+        lines = text.strip().splitlines()
+        self.assertEqual(lines[0], "0:00 First")
+        self.assertEqual(lines[1], "0:20 Middle")
+        self.assertEqual(lines[2], "0:40 Last")
 
 
 if __name__ == "__main__":
