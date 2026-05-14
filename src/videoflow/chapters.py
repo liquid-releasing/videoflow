@@ -5,15 +5,25 @@ Every forge tool that loads a track wants to ask the same question —
 centralises that lookup so forgegen / forgevents / FunscriptForge Pro /
 ForgeAssembler / ForgePlayer all see the same answer.
 
-Priority order (locked 2026-04-27):
+Priority order (revised 2026-05-14; was the inverse pre-revision):
 
-1. **Embedded mp4 chapters** — ``ffprobe -show_chapters`` on the source
-   media. Honours chapter markers authored by external tools.
-2. **Sidecar JSON** — ``<stem>.chapters.json`` next to the source.
+1. **Sidecar JSON** — ``<stem>.chapters.json`` next to the source. The
+   sidecar is the editable, authoritative store; if the user has
+   touched chapters anywhere in the toolchain, they live here. Wins
+   over embedded markers because the sidecar reflects later edits.
+2. **Embedded mp4 chapters** — ``ffprobe -show_chapters`` on the source
+   media. Honoured when no sidecar exists; common path for the
+   "imported from Movavi / external authoring tool" workflow when the
+   recovery hasn't yet written a sidecar.
 3. **Analysis JSON** — ``<stem>.analysis.json`` produced by forgegen,
    reading either ``metadata.chapters`` (authored) or ``chapter_proposals``
    (auto-detected). The proposals shape is mapped to :class:`Chapter`
    by treating ``intent_proposal`` as the intent.
+
+The principle (articulated by user 2026-05-07): **hand-built chapters
+are authoritative. Detection is the fallback, not the default.** The
+sidecar is where hand-built data accumulates as it flows through the
+toolchain — so the sidecar wins.
 
 If none of the sources has chapters, :func:`load_chapters` returns
 ``None`` so the caller can decide what to do (v0.0.5+ runs auto-detection;
@@ -21,6 +31,18 @@ v0.0.4 generates without chapter biasing).
 
 This module does **not** auto-detect. Auto-detection is v0.0.5+ scope
 and lives in ``videoflow.structural``.
+
+Writers:
+
+- :func:`write_chapters_sidecar` — author the sidecar from a chapter
+  list (the "Movavi recovery" workflow: user has timestamps from an
+  external tool, wants them written to a forgegen-readable sidecar).
+  Marks records ``auto_generated: false`` so the merge layer in
+  :mod:`videoflow.sidecar` treats them as LATCHED.
+- :func:`embed_in_mp4` — mux chapters into an MP4 via FFMETADATA1 +
+  ``ffmpeg -codec copy`` (no re-encode). Used to round-trip hand-
+  authored chapters back into the file itself so other tools that
+  only read embedded markers (e.g. some players) see them.
 
 Example::
 
@@ -356,11 +378,14 @@ def read_analysis_chapters(media_path: str | Path) -> list[Chapter] | None:
 def load_chapters(media_path: str | Path) -> list[Chapter] | None:
     """Resolve chapters for *media_path* from the highest-priority source.
 
-    Priority:
+    Priority (revised 2026-05-14):
 
-    1. Embedded mp4 chapters (``ffprobe -show_chapters``)
-    2. ``<stem>.chapters.json`` sidecar
+    1. ``<stem>.chapters.json`` sidecar — the editable, authoritative
+       store. Hand-built chapters live here.
+    2. Embedded mp4 chapters (``ffprobe -show_chapters``) — honoured
+       when no sidecar exists.
     3. ``<stem>.analysis.json`` (``metadata.chapters`` or ``chapter_proposals``)
+       — forgegen-produced fallback.
 
     Returns ``None`` if no source had chapters. Returns the chapter
     list from the first source that did, even if that list is empty.
@@ -379,16 +404,242 @@ def load_chapters(media_path: str | Path) -> list[Chapter] | None:
     if not path.exists():
         raise FileNotFoundError(f"Media file not found: {path}")
 
-    mp4 = read_mp4_chapters(path)
-    if mp4 is not None:
-        return mp4
-
     sidecar = read_sidecar_chapters(path)
     if sidecar is not None:
         return sidecar
+
+    mp4 = read_mp4_chapters(path)
+    if mp4 is not None:
+        return mp4
 
     analysis = read_analysis_chapters(path)
     if analysis is not None:
         return analysis
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Writers
+# ---------------------------------------------------------------------------
+
+def write_chapters_sidecar(
+    media_path: str | Path,
+    chapters: list[Chapter],
+    *,
+    writer: str = "external",
+    writer_version: str = "",
+) -> Path:
+    """Write *chapters* to ``<stem>.chapters.json`` next to *media_path*.
+
+    Thin convenience over :func:`videoflow.sidecar.write_sidecar` for
+    the "I have a chapter list and want it on disk" use case (Movavi
+    timestamp recovery, hand-author from CLI, etc.). Each chapter is
+    written with ``auto_generated: false`` so the sidecar merge layer
+    treats it as LATCHED — subsequent ``mode="analyze"`` writers
+    (e.g. ``videoflow.structural.auto_chapter``) leave it alone.
+
+    Uses ``mode="edit"`` so the call counts as a user edit in the
+    sidecar's provenance trail. If a sidecar already exists, the
+    field-level merger in :mod:`videoflow.sidecar` preserves any
+    non-chapter data (phrases / energy / etc.) and merges chapters
+    by primary key.
+
+    Args:
+        media_path: Path to the source media.
+        chapters: List of :class:`Chapter` records to persist.
+        writer: Module / app id recorded in the sidecar's provenance
+            block. Defaults to ``"external"`` for hand-authored
+            workflows; CLI callers should pass ``"videoflow.cli"``.
+        writer_version: Optional version string for provenance.
+
+    Returns:
+        The sidecar path that was written.
+
+    Raises:
+        videoflow.sidecar.SidecarError: If the existing sidecar is
+            malformed or merge rules fail.
+    """
+    # Lazy import — sidecar.py imports Chapter from this module, so a
+    # top-level import here would close the cycle. The lazy form lets
+    # ``from videoflow.chapters import *`` work even when sidecar.py
+    # is partially loaded.
+    from videoflow.sidecar import write_sidecar as _write_sidecar
+
+    payload: dict = {
+        "chapters": [
+            {**c.to_dict(), "auto_generated": False}
+            for c in chapters
+        ],
+    }
+    return _write_sidecar(
+        media_path,
+        payload,
+        writer=writer,
+        writer_version=writer_version,
+        mode="edit",
+    )
+
+
+def _format_ffmetadata1(chapters: list[Chapter]) -> str:
+    """Render *chapters* as an FFMETADATA1 document.
+
+    FFMETADATA1 is the text format ffmpeg accepts via ``-i <file>`` +
+    ``-map_metadata <stream>``. Each chapter block carries a
+    ``TIMEBASE=1/1000`` declaration so START/END can be written in
+    milliseconds directly (matches :class:`Chapter`'s ``at_ms`` /
+    ``end_ms`` fields without a units conversion).
+
+    For chapters with ``end_ms is None`` (open-ended "until next
+    chapter"), END is set to the START of the next chapter; the last
+    chapter's END is left as START + 1 (a placeholder that ffmpeg
+    rejects if it equals START exactly). Callers wanting a clean
+    final-chapter END should set it explicitly.
+    """
+    if not chapters:
+        return ";FFMETADATA1\n"
+
+    # Sort by start so the file matches reading order. Embedded
+    # chapters are typically already sorted, but be defensive.
+    sorted_ch = sorted(chapters, key=lambda c: c.at_ms)
+    out: list[str] = [";FFMETADATA1\n"]
+    for i, ch in enumerate(sorted_ch):
+        end_ms = ch.end_ms
+        if end_ms is None:
+            # Fill in from the next chapter's start, or fall back to
+            # a 1ms-after-start sentinel for the trailing chapter.
+            if i + 1 < len(sorted_ch):
+                end_ms = sorted_ch[i + 1].at_ms
+            else:
+                end_ms = ch.at_ms + 1
+        # ffmpeg rejects START >= END; guard against degenerate input.
+        if end_ms <= ch.at_ms:
+            end_ms = ch.at_ms + 1
+
+        out.append("[CHAPTER]\n")
+        out.append("TIMEBASE=1/1000\n")
+        out.append(f"START={ch.at_ms}\n")
+        out.append(f"END={end_ms}\n")
+        # Prefer the human label; fall back to intent so the chapter
+        # at least has SOMETHING in players that show titles.
+        title = ch.name or ch.intent
+        if title:
+            # FFMETADATA1 escapes \, =, ;, #, and \n with a backslash.
+            escaped = (
+                title.replace("\\", "\\\\")
+                .replace("=", "\\=")
+                .replace(";", "\\;")
+                .replace("#", "\\#")
+                .replace("\n", "\\\n")
+            )
+            out.append(f"title={escaped}\n")
+    return "".join(out)
+
+
+def _find_ffmpeg() -> str:
+    """Locate ffmpeg — PATH first, then alongside videoflow's package.
+
+    Mirrors :func:`_find_ffprobe` and the lookup pattern in
+    :mod:`videoflow.audio` so all videoflow callers find the same
+    binary regardless of entry point.
+    """
+    pkg_dir = Path(__file__).parent
+    for candidate in (pkg_dir / "ffmpeg.exe", pkg_dir / "ffmpeg"):
+        if candidate.is_file():
+            return str(candidate)
+    return "ffmpeg"
+
+
+def embed_in_mp4(
+    input_path: str | Path,
+    output_path: str | Path,
+    chapters: list[Chapter],
+    *,
+    ffmpeg: str | None = None,
+) -> Path:
+    """Mux *chapters* into a copy of *input_path* at *output_path*.
+
+    Builds an FFMETADATA1 document from *chapters* and runs
+    ``ffmpeg -i <input> -i <ffmetadata> -map_metadata 1 -codec copy
+    <output>``. No re-encode: stream copy is near-instant even on
+    multi-GB media.
+
+    Use this to round-trip hand-authored chapters back into the file
+    itself, so external tools that only read embedded markers see them
+    (mpv's ``chapter_list``, QuickTime's chapter track, players that
+    don't speak sidecar JSON, etc.).
+
+    Args:
+        input_path: Source media. Must exist.
+        output_path: Destination path. Overwritten if it exists.
+            Must not be the same as *input_path* (ffmpeg refuses to
+            read and write the same file simultaneously).
+        chapters: Chapters to embed. Empty list is allowed and
+            produces a metadata-only copy without any chapter atoms.
+        ffmpeg: Override the ffmpeg binary. Defaults to
+            :func:`_find_ffmpeg`.
+
+    Returns:
+        The output path.
+
+    Raises:
+        FileNotFoundError: If *input_path* does not exist or ffmpeg
+            isn't on PATH and no bundled binary is available.
+        ChapterError: If ffmpeg exits non-zero (stderr surfaced).
+    """
+    import tempfile
+
+    src = Path(input_path)
+    dst = Path(output_path)
+    if not src.exists():
+        raise FileNotFoundError(f"Input not found: {src}")
+    if src.resolve() == dst.resolve():
+        raise ChapterError(
+            "embed_in_mp4: input_path and output_path resolve to the "
+            "same file; ffmpeg cannot stream-copy in place"
+        )
+
+    ffmpeg_bin = ffmpeg or _find_ffmpeg()
+    metadata_text = _format_ffmetadata1(chapters)
+
+    # Write the FFMETADATA1 document to a temp file so ffmpeg can read
+    # it as a second input. Use NamedTemporaryFile with delete=False so
+    # the path is stable across the subprocess call; clean up in
+    # `finally` regardless of outcome.
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", suffix=".ffmetadata", delete=False,
+    )
+    try:
+        tmp.write(metadata_text)
+        tmp.close()
+        try:
+            result = subprocess.run(
+                [
+                    ffmpeg_bin,
+                    "-y",                     # overwrite output without prompt
+                    "-i", str(src),
+                    "-i", tmp.name,
+                    "-map_metadata", "1",     # take metadata from the FFMETADATA1 input
+                    "-map_chapters", "1",     # take chapters from the FFMETADATA1 input
+                    "-codec", "copy",         # no re-encode
+                    str(dst),
+                ],
+                capture_output=True,
+                text=True,
+                creationflags=_NO_WINDOW,
+            )
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"ffmpeg not found ({ffmpeg_bin}). Install ffmpeg or "
+                f"place ffmpeg.exe alongside videoflow."
+            ) from exc
+
+        if result.returncode != 0:
+            raise ChapterError(
+                f"ffmpeg exited {result.returncode} while embedding "
+                f"chapters into {dst}: {result.stderr.strip()}"
+            )
+    finally:
+        Path(tmp.name).unlink(missing_ok=True)
+
+    return dst

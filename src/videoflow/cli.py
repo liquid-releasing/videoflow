@@ -492,6 +492,134 @@ def cmd_concat(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# chapters-write-sidecar — author a sidecar from an external chapter list
+# ---------------------------------------------------------------------------
+
+def cmd_chapters_write_sidecar(args: argparse.Namespace) -> int:
+    """Write a hand-authored chapter list to ``<stem>.chapters.json``.
+
+    Source format is either a bare list of chapter dicts or the
+    ``{"chapters": [...]}`` envelope. Each chapter must have ``at_ms``
+    (or legacy ``at`` / proposal ``start_ms``); ``name`` and ``intent``
+    are optional. The records land with ``auto_generated: false`` so
+    subsequent ``mode="analyze"`` writers never overwrite them.
+
+    Primary use: Movavi chapter recovery — user reads timestamps off
+    Movavi's project file, drops them into a JSON list, runs this
+    command to materialise the sidecar next to the source video.
+    """
+    from videoflow.chapters import Chapter, ChapterError, write_chapters_sidecar
+    from videoflow.sidecar import SidecarError
+
+    try:
+        raw = json.loads(Path(args.chapters_json).read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        _err(str(exc), args.human)
+        return 1
+    except json.JSONDecodeError as exc:
+        _err(f"{args.chapters_json}: invalid JSON: {exc}", args.human)
+        return 1
+
+    chapter_list = raw if isinstance(raw, list) else raw.get("chapters", [])
+    if not isinstance(chapter_list, list):
+        _err(
+            f"{args.chapters_json}: expected a list or an object with a "
+            f"'chapters' field; got {type(chapter_list).__name__}",
+            args.human,
+        )
+        return 1
+
+    try:
+        chapters = [Chapter.from_dict(c) for c in chapter_list]
+    except ChapterError as exc:
+        _err(str(exc), args.human)
+        return 1
+
+    try:
+        written = write_chapters_sidecar(
+            args.input,
+            chapters,
+            writer="videoflow.cli",
+            writer_version=_videoflow_version_for_metadata(),
+        )
+    except (FileNotFoundError, SidecarError) as exc:
+        _err(str(exc), args.human)
+        return 1
+
+    data = {
+        "input": str(args.input),
+        "source": str(args.chapters_json),
+        "sidecar": str(written),
+        "chapter_count": len(chapters),
+    }
+    if args.human:
+        print(f"input:         {args.input}")
+        print(f"source:        {args.chapters_json}")
+        print(f"sidecar:       {written}")
+        print(f"chapter_count: {len(chapters)}")
+    else:
+        print(json.dumps(data, indent=2))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# chapters-embed — mux a chapter set into a video via FFMETADATA1
+# ---------------------------------------------------------------------------
+
+def cmd_chapters_embed(args: argparse.Namespace) -> int:
+    """Mux the sidecar's chapters into ``<output>`` via ffmpeg ``-codec copy``.
+
+    Reads chapters from the highest-priority source for ``<input>`` (see
+    :func:`videoflow.chapters.load_chapters`). With the sidecar-first
+    priority, this is the sidecar when present — exactly the
+    "I just authored chapters and want them inside the file" workflow.
+
+    No re-encode. Stream-copy is near-instant on multi-GB media. Useful
+    when downstream consumers only read embedded markers (some players,
+    QuickTime, Plex) and won't pick up the sidecar.
+    """
+    from videoflow.chapters import (
+        ChapterError, embed_in_mp4, load_chapters,
+    )
+
+    try:
+        chapters = load_chapters(args.input)
+    except (FileNotFoundError, ChapterError) as exc:
+        _err(str(exc), args.human)
+        return 1
+
+    if chapters is None:
+        _err(
+            f"no chapters found for {args.input} (looked at sidecar, "
+            f"embedded mp4, and analysis.json)",
+            args.human,
+        )
+        return 1
+
+    try:
+        embed_in_mp4(args.input, args.output, chapters)
+    except FileNotFoundError as exc:
+        _err(str(exc), args.human)
+        return 1
+    except ChapterError as exc:
+        _err(str(exc), args.human)
+        return 1
+
+    data = {
+        "input": str(args.input),
+        "output": str(args.output),
+        "chapter_count": len(chapters),
+    }
+    if args.human:
+        print(f"input:         {args.input}")
+        print(f"output:        {args.output}")
+        print(f"chapter_count: {len(chapters)}")
+    else:
+        print(json.dumps(data, indent=2))
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
 
@@ -836,6 +964,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="ffmpeg encoding preset (default: fast).",
     )
     p_concat.set_defaults(func=cmd_concat)
+
+    # chapters-write-sidecar — author <stem>.chapters.json from an external chapter list
+    p_chwrite = sub.add_parser(
+        "chapters-write-sidecar",
+        help=(
+            "Write a hand-authored chapter list to <stem>.chapters.json next to "
+            "the source video. Records land with auto_generated: false (LATCH)."
+        ),
+    )
+    p_chwrite.add_argument("input", type=Path, help="Source media file.")
+    p_chwrite.add_argument(
+        "chapters_json",
+        type=Path,
+        help=(
+            "Path to a JSON file containing either a bare list of chapter "
+            "dicts or an object with a 'chapters' field. Each chapter "
+            "must have at_ms (or legacy 'at' / proposal 'start_ms')."
+        ),
+    )
+    p_chwrite.set_defaults(func=cmd_chapters_write_sidecar)
+
+    # chapters-embed — mux chapters into an MP4 via ffmpeg -codec copy
+    p_chembed = sub.add_parser(
+        "chapters-embed",
+        help=(
+            "Mux chapters into a copy of <input> at <output>. Reads chapters "
+            "from the highest-priority source (sidecar first); no re-encode."
+        ),
+    )
+    p_chembed.add_argument("input", type=Path, help="Source media file.")
+    p_chembed.add_argument(
+        "output",
+        type=Path,
+        help="Output video path. Must not equal input.",
+    )
+    p_chembed.set_defaults(func=cmd_chapters_embed)
 
     return parser
 

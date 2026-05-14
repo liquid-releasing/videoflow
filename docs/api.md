@@ -197,7 +197,7 @@ scenes = detect_scenes("video.mp4", detector="adaptive")
 
 `DETECTOR_INFO` carries human-readable guidance per detector (best-for / not-great-for / threshold ranges).
 
-## Chapters — typed record + resolver
+## Chapters — typed record + resolver + writers
 
 ```python
 from videoflow.chapters import (
@@ -207,10 +207,33 @@ from videoflow.chapters import (
     read_mp4_chapters,
     read_sidecar_chapters,
     read_analysis_chapters,
+    write_chapters_sidecar,
+    embed_in_mp4,
 )
 ```
 
-`Chapter` is the typed dataclass for one chapter record (`at_ms` / `end_ms` / `name` / `intent` / `content_type` / `confidence` / `evidence`; `to_dict` / `from_dict` for serialisation). `load_chapters(media_path)` resolves chapters from the highest-priority source: embedded MP4 chapters → `<stem>.chapters.json` sidecar → `<stem>.analysis.json` (forgegen-produced). Returns `None` when no source has chapters.
+`Chapter` is the typed dataclass for one chapter record (`at_ms` / `end_ms` / `name` / `intent` / `content_type` / `confidence` / `evidence`; `to_dict` / `from_dict` for serialisation).
+
+`load_chapters(media_path)` resolves chapters from the highest-priority source. Priority (revised 2026-05-14):
+
+1. `<stem>.chapters.json` sidecar — the editable, authoritative store. Hand-built chapters live here.
+2. Embedded MP4 chapters (`ffprobe -show_chapters`) — honoured when no sidecar exists.
+3. `<stem>.analysis.json` (forgegen-produced) — fallback.
+
+Returns `None` when no source has chapters. **Principle**: hand-built chapters are authoritative; detection is the fallback, not the default.
+
+### Writers
+
+```python
+write_chapters_sidecar(media_path, chapters, *, writer="external")
+embed_in_mp4(input_path, output_path, chapters)
+```
+
+`write_chapters_sidecar` writes a chapter list to `<stem>.chapters.json` via the merge layer in `videoflow.sidecar`. Records land with `auto_generated: false` so subsequent analyze writers (`videoflow.structural.auto_chapter`) leave them alone. Use this for hand-authored / external-recovery workflows.
+
+`embed_in_mp4` muxes chapters into a copy of *input_path* at *output_path* using FFMETADATA1 + `ffmpeg -codec copy`. No re-encode. Round-trips hand-authored chapters back into the file itself so external tools that only read embedded markers (mpv, QuickTime, Plex) see them.
+
+CLI equivalents: `videoflow chapters-write-sidecar <video> <chapters.json>` and `videoflow chapters-embed <input> <output>`.
 
 ## CLI
 
