@@ -227,6 +227,88 @@ class TestClassifyContent(unittest.TestCase):
 # see tests/test_sidecar.py for read / write / merge coverage.
 
 
+class TestAutoChapterAudioSidecars(unittest.TestCase):
+    """auto_chapter writes peaks + spectrogram sidecars alongside the
+    chapters sidecar so the MediaViewer's Audio + Spectro modes light
+    up immediately after analysis without a separate decode pass.
+
+    Regression guard against the lazy-load bug (2026-05-20-ish) where
+    sidecars were built multiple times in separate sessions and burped
+    video playback. See [[project-spectrogram-in-flight]] in the
+    funscriptforge memory.
+    """
+
+    def test_writes_peaks_and_spectrogram_sidecars(self):
+        from videoflow.audio_peaks import sidecar_path as peaks_sidecar
+        from videoflow.audio_spectrogram import sidecar_path as spectro_sidecar
+
+        sr = 22050
+        with TemporaryDirectory() as td:
+            # 30s short file → whole_file branch, still runs peaks +
+            # spectrogram stages.
+            wav = Path(td) / "track.wav"
+            _save_wav(wav, _sine(30.0, 440, sr), sr)
+
+            chapters = auto_chapter(wav, write_sidecar=True)
+            self.assertEqual(len(chapters), 1)
+
+            peaks_path = Path(peaks_sidecar(wav))
+            spec_path = Path(spectro_sidecar(wav))
+            self.assertTrue(peaks_path.exists(), f"missing {peaks_path}")
+            self.assertTrue(spec_path.exists(), f"missing {spec_path}")
+
+            # Sanity-check the on-disk shapes match the documented schema
+            # so any future change to the sidecar format gets caught here
+            # rather than only at the JS consumer.
+            peaks_data = json.loads(peaks_path.read_text())
+            self.assertEqual(peaks_data["version"], "1.0")
+            self.assertGreater(peaks_data["peak_count"], 0)
+            self.assertEqual(peaks_data["peak_count"], len(peaks_data["peaks"]))
+
+            spec_data = json.loads(spec_path.read_text())
+            self.assertEqual(spec_data["version"], "1.0")
+            self.assertGreater(spec_data["n_frames"], 0)
+            self.assertEqual(spec_data["n_mels"], 64)
+            self.assertIsInstance(spec_data["cells_b64"], str)
+
+    def test_skips_audio_sidecars_when_write_sidecar_false(self):
+        from videoflow.audio_peaks import sidecar_path as peaks_sidecar
+        from videoflow.audio_spectrogram import sidecar_path as spectro_sidecar
+
+        sr = 22050
+        with TemporaryDirectory() as td:
+            wav = Path(td) / "track.wav"
+            _save_wav(wav, _sine(15.0, 440, sr), sr)
+            auto_chapter(wav, write_sidecar=False)
+            self.assertFalse(Path(peaks_sidecar(wav)).exists())
+            self.assertFalse(Path(spectro_sidecar(wav)).exists())
+
+    def test_progress_emits_audio_peaks_and_spectrogram_stages(self):
+        """The AcceptBar footer step list reads these labels — keeping
+        them stable matters for the visible-progress UX."""
+        sr = 22050
+        labels: list[str] = []
+        with TemporaryDirectory() as td:
+            wav = Path(td) / "track.wav"
+            _save_wav(wav, _sine(30.0, 440, sr), sr)
+            auto_chapter(
+                wav, write_sidecar=True, progress_callback=labels.append,
+            )
+        # The progress_callback receives the human-readable per-stage
+        # _progress() strings; the structured stage names land on the
+        # OnProgress channel instead. The two stage messages we emit
+        # inside the new stages are "Computing audio peaks…" and
+        # "Computing mel spectrogram…".
+        self.assertTrue(
+            any("audio peaks" in lb.lower() for lb in labels),
+            f"no 'audio peaks' label in {labels}",
+        )
+        self.assertTrue(
+            any("spectrogram" in lb.lower() for lb in labels),
+            f"no 'spectrogram' label in {labels}",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Energy payload builder (phrase classification + chapter-index lookup
 # moved to videoflow.phrases — see tests/test_phrases.py)

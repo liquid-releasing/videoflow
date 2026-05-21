@@ -31,6 +31,14 @@ from pathlib import Path
 from typing import Callable
 
 from videoflow.audio import analyze_beats as _analyze_beats
+from videoflow.audio_peaks import (
+    compute_sidecar_from_samples as _peaks_compute,
+    write_sidecar as _peaks_write,
+)
+from videoflow.audio_spectrogram import (
+    compute_sidecar_from_samples as _spectro_compute,
+    write_sidecar as _spectro_write,
+)
 from videoflow.chapters import Chapter
 from videoflow.phrases import Phrase, classify_phrases as _classify_phrases
 from videoflow.progress import OnProgress, ProgressReporter
@@ -218,6 +226,48 @@ def auto_chapter(
                 reporter.complete(
                     summary=f"{len(phrases)} phrases classified",
                 )
+
+            # MediaViewer sidecars — peaks + spectrogram, built from the
+            # same `y` array that just drove beat / chapter analysis. No
+            # re-decode, no separate librosa.load — the whole point is
+            # that the user already committed to wait for chapter
+            # analysis, so we make every other audio-derived artifact
+            # ready in the same pass. Previously these were lazy-loaded
+            # on first viewer-mode toggle, which made playback burp
+            # while the second decode ran. See [[project-spectrogram-in-flight]]
+            # in the funscriptforge memory for the bug-fix rationale.
+            #
+            # Gated on `write_sidecar` to match the rest of the pipeline
+            # — tests calling auto_chapter with write_sidecar=False stay
+            # clean of disk writes.
+            if write_sidecar:
+                with reporter.stage("audio_peaks"):
+                    _progress("Computing audio peaks…")
+                    peaks_data = _peaks_compute(y, sr=sr_)
+                    if peaks_data is not None:
+                        _peaks_write(media_path, peaks_data)
+                        reporter.complete(
+                            summary=(
+                                f"{peaks_data['peak_count']} peaks @ "
+                                f"{peaks_data['hop_ms']}ms"
+                            ),
+                        )
+                    else:
+                        reporter.complete(summary="skipped (degenerate input)")
+
+                with reporter.stage("spectrogram"):
+                    _progress("Computing mel spectrogram…")
+                    spec_data = _spectro_compute(y, sr=sr_)
+                    if spec_data is not None:
+                        _spectro_write(media_path, spec_data)
+                        reporter.complete(
+                            summary=(
+                                f"{spec_data['n_frames']} frames × "
+                                f"{spec_data['n_mels']} mel bins"
+                            ),
+                        )
+                    else:
+                        reporter.complete(summary="skipped (degenerate input)")
         finally:
             if _tmp is not None:
                 Path(_tmp).unlink(missing_ok=True)
