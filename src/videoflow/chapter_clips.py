@@ -95,19 +95,15 @@ def _sanitize_stem(stem: str) -> str:
     return _SAFE_STEM_RE.sub("_", stem).strip("._") or "media"
 
 
-def chapter_clips_dir() -> Path:
-    """Return (and create) the funscriptforge clip cache directory.
+def chapter_clips_dir(media_path: str | Path) -> Path:
+    """Return the chapter-clip cache directory for *media_path*.
 
-    The directory name is intentionally tied to funscriptforge — that's
-    the only current consumer, and the Rust fallback command writes to
-    the same location. Other consumers can call :func:`extract_chapter_clip`
-    with an explicit ``output_path`` to put the clip wherever they want.
+    Lives inside the per-project hidden forge dir as
+    ``<dir>/.<stem>.forge/clips/``. Caller is responsible for mkdir'ing
+    before writing (:func:`extract_chapter_clip` does this).
     """
-    import tempfile
-
-    out = Path(tempfile.gettempdir()) / "funscriptforge_clips"
-    out.mkdir(parents=True, exist_ok=True)
-    return out
+    from videoflow.sidecar import forge_dir
+    return forge_dir(media_path) / "clips"
 
 
 def chapter_clip_path(media_path: str | Path, start_ms: int, end_ms: int) -> Path:
@@ -125,7 +121,7 @@ def chapter_clip_path(media_path: str | Path, start_ms: int, end_ms: int) -> Pat
     ext = src.suffix.lstrip(".").lower() or _DEFAULT_EXT
     stem = _sanitize_stem(src.stem)
     name = f"{stem}_{CACHE_VERSION}_{int(start_ms)}_{int(end_ms)}.{ext}"
-    return chapter_clips_dir() / name
+    return chapter_clips_dir(media_path) / name
 
 
 def extract_chapter_clip(

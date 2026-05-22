@@ -75,15 +75,36 @@ class SidecarError(RuntimeError):
 # Path
 # ---------------------------------------------------------------------------
 
-def sidecar_path_for(media_path: str | Path) -> Path:
-    """Return the canonical sidecar path next to *media_path*.
+def forge_dir(media_path: str | Path) -> Path:
+    """Return the per-project hidden cache directory for *media_path*.
 
-    Uses the ``<stem>.chapters.json`` form (e.g. ``track.mp4`` →
-    ``track.chapters.json``) — the convention :mod:`videoflow.chapters`
-    resolves on read.
+    All videoflow sidecars (chapters, peaks, spectrogram, beats,
+    phrases) and the funscriptforge chapter-clip MP4 cache live inside
+    this folder rather than scattering next to the source file:
+
+        <dir>/.<stem>.forge/
+            <stem>.chapters.json
+            <stem>.audio.json
+            <stem>.spectrogram.json
+            <stem>.beats.json
+            clips/
+                <stem>_v11_<start>_<end>.mp4
+
+    Leading dot keeps it tidy in directory listings. Callers are
+    responsible for ``mkdir(parents=True, exist_ok=True)`` before
+    writing.
     """
     path = Path(media_path)
-    return path.with_name(path.stem + ".chapters.json")
+    return path.parent / f".{path.stem}.forge"
+
+
+def sidecar_path_for(media_path: str | Path) -> Path:
+    """Return the canonical chapters sidecar path inside the forge dir.
+
+    e.g. ``track.mp4`` → ``.track.forge/track.chapters.json``.
+    """
+    path = Path(media_path)
+    return forge_dir(path) / f"{path.stem}.chapters.json"
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +209,7 @@ def write_sidecar(
             contains malformed records.
     """
     target = sidecar_path_for(media_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
     incoming = _normalise(dict(payload), source="payload")
 
     existing = read_sidecar(media_path)

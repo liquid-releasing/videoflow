@@ -74,10 +74,14 @@ DEFAULT_FMAX = 8000
 
 
 def sidecar_path(media_path: str | Path) -> str:
-    """Canonical sidecar path for the given media file. Mirrors the
-    audio_peaks sidecar convention — replace the suffix, write next to
-    the media file."""
-    return str(Path(media_path).with_suffix(SIDECAR_SUFFIX))
+    """Canonical sidecar path for the given media file.
+
+    Lives inside the per-project ``.<stem>.forge/`` directory (see
+    :func:`videoflow.sidecar.forge_dir`).
+    """
+    from videoflow.sidecar import forge_dir
+    p = Path(media_path)
+    return str(forge_dir(p) / f"{p.stem}{SIDECAR_SUFFIX}")
 
 
 def load_sidecar(media_path: str | Path) -> dict[str, Any] | None:

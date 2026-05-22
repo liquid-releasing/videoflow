@@ -287,17 +287,18 @@ def read_sidecar_chapters(media_path: str | Path) -> list[Chapter] | None:
         ChapterError: If the sidecar exists but is unreadable JSON or
             contains malformed chapter records.
     """
+    # Lazy import — sidecar.py imports Chapter from this module, so a
+    # top-level import would close the cycle.
+    from videoflow.sidecar import forge_dir
+
     path = Path(media_path)
-    sidecar = path.with_suffix(path.suffix + ".chapters.json")
+    # Sidecars live inside the per-project hidden forge dir
+    # (``<dir>/.<stem>.forge/<stem>.chapters.json``). Pre-forge-dir
+    # sidecars in the source directory are ignored — re-Analyze
+    # rebuilds them in the new location.
+    sidecar = forge_dir(path) / f"{path.stem}.chapters.json"
     if not sidecar.exists():
-        # Also check the more common "<stem>.chapters.json" form
-        # (e.g. track.mp4 → track.chapters.json) in case the suffix-
-        # appending convention isn't used.
-        alt = path.with_name(path.stem + ".chapters.json")
-        if alt.exists():
-            sidecar = alt
-        else:
-            return None
+        return None
 
     try:
         doc = json.loads(sidecar.read_text(encoding="utf-8"))
