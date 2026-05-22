@@ -31,6 +31,9 @@ from pathlib import Path
 from typing import Callable
 
 from videoflow.audio import analyze_beats as _analyze_beats
+from videoflow.audio_beats import (
+    write_sidecar_from_beat_map as _beats_write_sidecar,
+)
 from videoflow.audio_peaks import (
     compute_sidecar_from_samples as _peaks_compute,
     write_sidecar as _peaks_write,
@@ -38,6 +41,10 @@ from videoflow.audio_peaks import (
 from videoflow.audio_spectrogram import (
     compute_sidecar_from_samples as _spectro_compute,
     write_sidecar as _spectro_write,
+)
+from videoflow.chapter_clips import (
+    chapter_clip_path as _clip_path,
+    extract_chapter_clip as _extract_clip,
 )
 from videoflow.chapters import Chapter
 from videoflow.phrases import Phrase, classify_phrases as _classify_phrases
@@ -268,6 +275,72 @@ def auto_chapter(
                         )
                     else:
                         reporter.complete(summary="skipped (degenerate input)")
+
+                # Beats sidecar — pure write of the AudioBeatMap that
+                # was already built in the beats stage above. No second
+                # librosa.beat run. Used by the MediaViewer to render
+                # discrete tick marks on the Audio waveform; future
+                # editing flows will snap actions to beat times.
+                if beat_map is not None:
+                    with reporter.stage("audio_beats"):
+                        _progress("Writing beats sidecar…")
+                        _beats_write_sidecar(media_path, beat_map)
+                        reporter.complete(
+                            summary=(
+                                f"{len(beat_map.beats)} beats @ "
+                                f"{beat_map.bpm:.1f} BPM"
+                            ),
+                        )
+
+                # Chapter clip extraction — pre-build the small per-
+                # chapter mp4 clips that funscriptforge's MediaViewer
+                # plays during editing. Doing this here means clicking a
+                # chapter in the editor is instant: the clip is already
+                # on disk. Without this stage the editor's Rust fallback
+                # extracts on-click, which blocks for several seconds on
+                # long high-bitrate sources.
+                #
+                # Only meaningful for video sources — audio-only files
+                # skip the extraction entirely (the original file is
+                # already playable directly).
+                if media_path.suffix.lower() in _VIDEO_SUFFIXES:
+                    with reporter.stage("chapter_clips"):
+                        ranges: list[tuple[int, int]] = []
+                        for ch in chapters:
+                            if ch.end_ms is None:
+                                continue
+                            ranges.append((int(ch.at_ms), int(ch.end_ms)))
+                        total = len(ranges)
+                        built = 0
+                        cached = 0
+                        for i, (start_ms, end_ms) in enumerate(ranges):
+                            out = _clip_path(media_path, start_ms, end_ms)
+                            if out.exists():
+                                cached += 1
+                            else:
+                                _progress(
+                                    f"Extracting chapter clip {i + 1}/{total}…"
+                                )
+                                try:
+                                    _extract_clip(
+                                        media_path, start_ms, end_ms, out,
+                                    )
+                                    built += 1
+                                except (RuntimeError, FileNotFoundError) as exc:
+                                    # Don't abort the whole pipeline if a
+                                    # single clip fails — the editor's
+                                    # Rust fallback will rebuild on-click
+                                    # if needed, and the rest of the
+                                    # chapter analysis is still valid.
+                                    _progress(
+                                        f"Chapter clip {i + 1} failed: {exc}"
+                                    )
+                        reporter.complete(
+                            summary=(
+                                f"{built + cached}/{total} clips ready "
+                                f"({cached} cached, {built} built)"
+                            ),
+                        )
         finally:
             if _tmp is not None:
                 Path(_tmp).unlink(missing_ok=True)
