@@ -69,6 +69,17 @@ from pathlib import Path
 _VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
+# Legacy → new texture-label mapping for chapter sidecars written by
+# pre-rename builds (before 2026-05-24). Applied on read in
+# :meth:`Chapter.from_dict` so old chapters.json files render under
+# the new vocabulary without rewriting the file. structural.py also
+# exports this for consumers that want the same mapping.
+_LEGACY_CONTENT_TYPE_MAP = {
+    "music":   "driving",
+    "ambient": "calm",
+    "mixed":   "varied",
+}
+
 
 class ChapterError(RuntimeError):
     """Raised when chapter resolution fails."""
@@ -97,16 +108,25 @@ class Chapter:
             ``"climax"``, ``"recover"``, ``"outro"``). Open string in
             v0.0.4; v0.0.5 locks the 7-element vocabulary alongside
             chapter intent biasing. Navigation-flavored.
-        content_type: Audio content-type heuristic from
+        content_type: Audio *texture* label from
             :mod:`videoflow.structural` auto-detection — one of
-            ``"music"``, ``"ambient"``, ``"mixed"``, or ``""`` when not
-            classified. Generation-flavored.
+            ``"driving"``, ``"calm"``, ``"varied"``, or ``""`` when not
+            classified. Renamed 2026-05-24 (was ``"music"`` /
+            ``"ambient"`` / ``"mixed"``); legacy values are mapped
+            on read by :meth:`from_dict`. Generation-flavored.
+        voice_label: Voice-presence label from the Silero VAD pass —
+            ``"talk"`` when the chapter is dominated by speech, ``""``
+            otherwise. Round 2 will subdivide into ``"sing"`` /
+            ``"react"`` via pitch-stability heuristics. Independent
+            axis from ``content_type``: a chapter can be (talk · calm)
+            or (talk · driving) or just (calm). Generation-flavored.
         confidence: Detection confidence in ``[0.0, 1.0]`` from
             auto-detection, or ``None`` when authored / unknown.
             Generation-flavored.
         evidence: Identifiers of the analysis features that produced
             this chapter — e.g. ``["recurrence_matrix", "silence",
-            "rms_variance"]``. Empty list for authored chapters.
+            "rms_variance"]``. ``"voice_vad"`` is added when Silero
+            detected speech. Empty list for authored chapters.
             Generation-flavored.
     """
 
@@ -115,6 +135,7 @@ class Chapter:
     name: str = ""
     intent: str = ""
     content_type: str = ""
+    voice_label: str = ""
     confidence: float | None = None
     evidence: list[str] = dataclasses.field(default_factory=list)
 
@@ -122,8 +143,9 @@ class Chapter:
         """Return a JSON-serialisable dict.
 
         Omits ``end_ms`` when ``None`` and the analytical fields
-        (``content_type`` / ``confidence`` / ``evidence``) when at
-        their defaults — authored chapters stay compact.
+        (``content_type`` / ``voice_label`` / ``confidence`` /
+        ``evidence``) when at their defaults — authored chapters
+        stay compact.
         """
         out: dict = {
             "at_ms": self.at_ms,
@@ -134,6 +156,8 @@ class Chapter:
             out["end_ms"] = self.end_ms
         if self.content_type:
             out["content_type"] = self.content_type
+        if self.voice_label:
+            out["voice_label"] = self.voice_label
         if self.confidence is not None:
             out["confidence"] = self.confidence
         if self.evidence:
@@ -171,7 +195,15 @@ class Chapter:
 
         intent = str(data.get("intent") or data.get("intent_proposal") or "")
         name = str(data.get("name") or "")
+        # Legacy migration: sidecars from before 2026-05-24 carry
+        # "music" / "ambient" / "mixed". Map to the new texture vocab
+        # on read so old chapters.json files render correctly under
+        # the new labels; the file gets rewritten with new values on
+        # the next analyze pass.
         content_type = str(data.get("content_type") or "")
+        if content_type in _LEGACY_CONTENT_TYPE_MAP:
+            content_type = _LEGACY_CONTENT_TYPE_MAP[content_type]
+        voice_label = str(data.get("voice_label") or "")
         confidence = data.get("confidence")
         if confidence is not None:
             confidence = float(confidence)
@@ -183,6 +215,7 @@ class Chapter:
             name=name,
             intent=intent,
             content_type=content_type,
+            voice_label=voice_label,
             confidence=confidence,
             evidence=evidence,
         )

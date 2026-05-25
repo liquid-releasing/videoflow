@@ -41,7 +41,7 @@ SCHEMA_NAME = "audio-structure"
 WriteMode = Literal["analyze", "edit"]
 
 # Field categories — drives merge. See audio-structure-primitive.md.
-_CHAPTER_ANALYTICAL: tuple[str, ...] = ("content_type", "confidence", "evidence")
+_CHAPTER_ANALYTICAL: tuple[str, ...] = ("content_type", "voice_label", "confidence", "evidence")
 _CHAPTER_AUTHORED: tuple[str, ...] = ("name", "intent", "include")
 _CHAPTER_MIXED: tuple[str, ...] = ("tone", "shape")
 _CHAPTER_STRUCTURAL: tuple[str, ...] = ("at_ms", "end_ms")
@@ -51,7 +51,20 @@ _PHRASE_AUTHORED: tuple[str, ...] = ("intent",)
 _PHRASE_MIXED: tuple[str, ...] = ("tone",)
 _PHRASE_STRUCTURAL: tuple[str, ...] = ("chapter_idx", "at_ms", "end_ms")
 
-_VALID_CONTENT_TYPES = frozenset({"", "music", "ambient", "mixed"})
+# Texture vocabulary. New names (driving / calm / varied) replaced
+# music / ambient / mixed on 2026-05-24 — see
+# videoflow.structural._TEXTURE_DRIVING for the rename rationale.
+# Both vocabularies are accepted on write so legacy sidecars round-trip;
+# Chapter.from_dict maps legacy values to new ones on read.
+_VALID_CONTENT_TYPES = frozenset({
+    "",
+    "driving", "calm", "varied",      # current (2026-05-24+)
+    "music", "ambient", "mixed",      # legacy — accepted on write, mapped on read
+})
+# Voice axis (Silero VAD). Round 1 is binary (talk vs. not). Round 2
+# will add 'sing' / 'react' via pitch-stability + segment-length heuristics
+# on the VAD output.
+_VALID_VOICE_LABELS = frozenset({"", "talk"})
 _VALID_PHRASE_MODES = frozenset({"", "tease", "steady", "edging", "break", "fast", "slow"})
 
 # FunscriptForge mood vocabulary (closed enum, cross-product semantic).
@@ -300,6 +313,12 @@ def _validate_chapter(ch: Any, *, source: str, idx: int) -> None:
         raise SidecarError(
             f"{source}: chapters[{idx}].content_type must be one of "
             f"{sorted(_VALID_CONTENT_TYPES)}, got {ct!r}"
+        )
+    vl = ch.get("voice_label")
+    if vl is not None and vl not in _VALID_VOICE_LABELS:
+        raise SidecarError(
+            f"{source}: chapters[{idx}].voice_label must be one of "
+            f"{sorted(_VALID_VOICE_LABELS)}, got {vl!r}"
         )
     tone = ch.get("tone")
     if tone is not None and tone not in _VALID_TONE_LABELS:

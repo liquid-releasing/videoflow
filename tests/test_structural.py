@@ -203,23 +203,26 @@ class TestClassifyContent(unittest.TestCase):
     def test_click_track_classifies_with_evidence(self):
         sr = 22050
         y = _click_track(20.0, sr, bpm=120.0)
-        content_type, confidence, evidence = _classify_content(y, sr)
-        # Strong percussive signature should land in music or mixed
-        self.assertIn(content_type, {"music", "mixed"})
+        content_type, _voice, confidence, evidence = _classify_content(y, sr)
+        # Strong percussive signature should land in driving (was "music"
+        # pre-rename 2026-05-24) or varied (was "mixed").
+        self.assertIn(content_type, {"driving", "varied"})
         self.assertGreater(confidence, 0.5)
         self.assertTrue(any("percussive" in e or "rms" in e or "flux" in e for e in evidence))
 
     def test_low_amplitude_noise_classifies_ambient_or_mixed(self):
         sr = 22050
         y = _pink_noise(20.0, sr, amp=0.02)
-        content_type, _conf, _evidence = _classify_content(y, sr)
-        self.assertIn(content_type, {"ambient", "mixed"})
+        content_type, _voice, _conf, _evidence = _classify_content(y, sr)
+        # Renamed: "ambient" → "calm", "mixed" → "varied".
+        self.assertIn(content_type, {"calm", "varied"})
 
     def test_sub_second_returns_unclassified(self):
         sr = 22050
         y = _sine(0.5, 440, sr)
-        content_type, confidence, _ = _classify_content(y, sr)
+        content_type, voice_label, confidence, _ = _classify_content(y, sr)
         self.assertEqual(content_type, "")
+        self.assertEqual(voice_label, "")
         self.assertEqual(confidence, 0.0)
 
 

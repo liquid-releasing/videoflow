@@ -54,6 +54,156 @@ from videoflow.sidecar import write_sidecar as _write_sidecar
 _VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
+# ─── Content-type label vocabulary ───────────────────────────────────────
+# Renamed 2026-05-24: the heuristic measures audio *texture* (dynamics +
+# percussive content + spectral change), not whether the track is
+# literally music vs. ambient noise. A hypnotic-narration track over a
+# music bed used to label as "music" because the bed scored well; users
+# read that as "this is music" and got confused. New names describe the
+# texture honestly.
+#
+# Voice presence is a separate axis from Silero VAD ([[_compute_voice_ratio]]).
+# A chapter can be (talk · calm), (talk · driving), (calm), etc.
+_TEXTURE_DRIVING = "driving"  # was "music" — high dynamics + percussive + flux
+_TEXTURE_CALM    = "calm"     # was "ambient" — low dynamics + low percussive
+_TEXTURE_VARIED  = "varied"   # was "mixed" — neither classifier branch dominates
+
+# Voice axis. Round 1 ships binary talk-vs-none; Round 2 will subdivide
+# into talk / sing / react via pitch-stability heuristics on the VAD
+# segments. See [[project-funscriptforge-pending]] (Round 2 voice subdivision).
+_VOICE_TALK = "talk"          # voice present and dominant
+_VOICE_NONE = ""              # voice ratio below threshold — empty string
+_VOICE_RATIO_TALK = 0.6       # chapter voice fraction above this → 'talk'
+
+# Legacy → new mapping for chapter sidecars written by pre-rename builds.
+# Exposed so Chapter.from_dict can migrate on read without rewriting the
+# file (the file gets rewritten naturally on the next analyze pass).
+LEGACY_CONTENT_TYPE_MAP = {
+    "music":   _TEXTURE_DRIVING,
+    "ambient": _TEXTURE_CALM,
+    "mixed":   _TEXTURE_VARIED,
+}
+
+# ─── Silero VAD (inline ONNX) ────────────────────────────────────────────
+# Speech detection runs as part of every chapter classification so the
+# voice_label axis populates without a second pass. We ship the Silero
+# v5 ONNX file alongside the package (~2 MB) and call it through
+# onnxruntime — no torch dependency, no large model download at runtime.
+#
+# The session is cached at module load so the inference cost is just the
+# per-chunk forward pass (~0.5 ms per 32 ms chunk on CPU). A whole-file
+# pass over a 2-hour movie at 16 kHz takes a few seconds.
+#
+# If onnxruntime isn't installed (the [voice] optional extra wasn't
+# selected) or the model file is missing, _compute_voice_ratio returns
+# 0.0 and the voice_label stays empty — the pipeline degrades cleanly.
+
+_VOICE_SAMPLE_RATE = 16000
+_VOICE_CHUNK_SAMPLES = 512     # 32 ms @ 16 kHz; Silero v5's required chunk size
+_VOICE_SPEECH_THRESHOLD = 0.5  # per-chunk probability above which we count as speech
+
+_silero_session = None
+_silero_load_attempted = False
+
+
+def _silero_model_path() -> Path:
+    """Path to the bundled Silero VAD ONNX file."""
+    return Path(__file__).parent / "silero_vad.onnx"
+
+
+def _get_silero_session():
+    """Lazy-load + cache the Silero ONNX session.
+
+    Returns ``None`` if onnxruntime isn't installed or the model file
+    is missing. Callers treat None as "voice classification disabled"
+    and return 0.0 from _compute_voice_ratio.
+    """
+    global _silero_session, _silero_load_attempted
+    if _silero_session is not None:
+        return _silero_session
+    if _silero_load_attempted:
+        return None
+    _silero_load_attempted = True
+    try:
+        import onnxruntime as _ort  # type: ignore[import]
+    except ImportError:
+        return None
+    model = _silero_model_path()
+    if not model.exists():
+        return None
+    try:
+        # Single-threaded CPU provider — VAD inference is so cheap that
+        # parallel threads add overhead larger than the work itself.
+        opts = _ort.SessionOptions()
+        opts.intra_op_num_threads = 1
+        opts.inter_op_num_threads = 1
+        _silero_session = _ort.InferenceSession(
+            str(model), sess_options=opts, providers=["CPUExecutionProvider"],
+        )
+    except Exception:
+        _silero_session = None
+    return _silero_session
+
+
+def _compute_voice_ratio(y, sr: int) -> float:
+    """Fraction of *y* that contains human speech, via Silero VAD.
+
+    Returns a value in ``[0.0, 1.0]`` — count of speech-flagged 32 ms
+    chunks divided by total chunks. Threshold per chunk is 0.5
+    (:data:`_VOICE_SPEECH_THRESHOLD`).
+
+    Returns 0.0 when:
+    - the buffer is shorter than 1 second (matches the texture-
+      classifier's floor — too short to mean anything)
+    - onnxruntime isn't installed
+    - the bundled silero_vad.onnx file isn't present
+    - resampling or inference raises
+
+    Callers treat 0.0 as "voice not detected" (which is also the
+    correct answer for the legitimately-no-voice case). The voice_label
+    only fires above :data:`_VOICE_RATIO_TALK`, so 0.0 always maps to
+    the empty voice label.
+    """
+    if len(y) < sr:
+        return 0.0
+    sess = _get_silero_session()
+    if sess is None:
+        return 0.0
+
+    # Silero v5 ONNX is fixed at 16 kHz mono float32. Resample if the
+    # caller's audio is at a different rate (typical: 22050 from
+    # videoflow.audio's analyze pipeline).
+    if sr != _VOICE_SAMPLE_RATE:
+        try:
+            y_in = _librosa.resample(y, orig_sr=sr, target_sr=_VOICE_SAMPLE_RATE)
+        except Exception:
+            return 0.0
+    else:
+        y_in = y
+    y_in = _np.ascontiguousarray(y_in, dtype=_np.float32)
+
+    n_chunks = len(y_in) // _VOICE_CHUNK_SAMPLES
+    if n_chunks == 0:
+        return 0.0
+
+    state = _np.zeros((2, 1, 128), dtype=_np.float32)
+    sr_in = _np.int64(_VOICE_SAMPLE_RATE)
+    speech_chunks = 0
+    try:
+        for i in range(n_chunks):
+            start = i * _VOICE_CHUNK_SAMPLES
+            chunk = y_in[start:start + _VOICE_CHUNK_SAMPLES][_np.newaxis, :]
+            prob, state = sess.run(
+                ["output", "stateN"],
+                {"input": chunk, "state": state, "sr": sr_in},
+            )
+            if float(prob[0, 0]) >= _VOICE_SPEECH_THRESHOLD:
+                speech_chunks += 1
+    except Exception:
+        return 0.0
+
+    return float(speech_chunks) / float(n_chunks)
+
 try:
     import librosa as _librosa  # type: ignore[import]
     import numpy as _np  # type: ignore[import]
@@ -74,6 +224,17 @@ DEFAULT_TARGET_MINUTES = 5.5
 # can occasionally pull two cuts close together when adjacent silence
 # regions exist; this cleans that up.
 _MIN_CHAPTER_FRACTION = 0.4
+
+# Above this multiple of target_seconds, a chapter is considered too
+# long for downstream editing and is split into evenly-spaced halves /
+# thirds / etc. Without this cap, uniform audio (LongandCut HDR, 2026-
+# 05-22) can yield a single multi-hour chapter that breaks the player
+# (one 4.5 GB clip → WebView2 OOM) and the editing flow (you can't
+# review N minutes of content in one band). 1.5× target = ~8 min at
+# the default 5.5-min target, which is short enough to keep clips
+# under the blob cap and long enough to preserve meaningful structure
+# in audio that lacks clear scene changes.
+_MAX_CHAPTER_MULTIPLE = 1.5
 
 # Minimum duration to bother chunking. Below this, return one whole-file
 # chapter — the segmentation cost isn't worth it and the per-segment
@@ -292,6 +453,45 @@ def auto_chapter(
                             ),
                         )
 
+                # Chapters sidecar is written BEFORE chapter_clips so
+                # the editor's chapter strip lights up the moment chapter
+                # data is on disk — not after the long per-chapter clip
+                # extraction. On 4K sources clip extraction can run for
+                # several minutes (each clip is multi-GB); without this
+                # ordering the user stares at an empty chapter strip
+                # while extraction grinds. clips remain useful (instant
+                # chapter playback) but they're no longer load-bearing
+                # for the chapter strip rendering.
+                #
+                # Order: audio sidecars → chapters sidecar → chapter_clips.
+                # See [[project-funscriptforge-pending]] ("when do we
+                # show the chapters?" UX fix, 2026-05-24).
+                with reporter.stage("sidecar"):
+                    _progress("Writing sidecar…")
+                    payload: dict = {
+                        "chapters": [c.to_dict() for c in chapters],
+                        "phrases": [p.to_dict() for p in phrases],
+                        "generated_by": {
+                            "tool": "videoflow.structural",
+                            "tool_version": _videoflow_version(),
+                            "target_minutes": target_minutes,
+                        },
+                    }
+                    if beat_map is not None:
+                        payload["energy"] = _build_energy(beat_map, chapters)
+                    _write_sidecar(
+                        media_path, payload,
+                        writer="videoflow.structural",
+                        writer_version=_videoflow_version(),
+                        mode="analyze",
+                    )
+                    reporter.complete(
+                        summary=(
+                            f"sidecar merged: {len(chapters)} chapters, "
+                            f"{len(payload['phrases'])} phrases"
+                        ),
+                    )
+
                 # Chapter clip extraction — pre-build the small per-
                 # chapter mp4 clips that funscriptforge's MediaViewer
                 # plays during editing. Doing this here means clicking a
@@ -344,33 +544,6 @@ def auto_chapter(
         finally:
             if _tmp is not None:
                 Path(_tmp).unlink(missing_ok=True)
-
-        if write_sidecar:
-            with reporter.stage("sidecar"):
-                _progress("Writing sidecar…")
-                payload: dict = {
-                    "chapters": [c.to_dict() for c in chapters],
-                    "phrases": [p.to_dict() for p in phrases],
-                    "generated_by": {
-                        "tool": "videoflow.structural",
-                        "tool_version": _videoflow_version(),
-                        "target_minutes": target_minutes,
-                    },
-                }
-                if beat_map is not None:
-                    payload["energy"] = _build_energy(beat_map, chapters)
-                _write_sidecar(
-                    media_path, payload,
-                    writer="videoflow.structural",
-                    writer_version=_videoflow_version(),
-                    mode="analyze",
-                )
-                reporter.complete(
-                    summary=(
-                        f"sidecar merged: {len(chapters)} chapters, "
-                        f"{len(payload['phrases'])} phrases"
-                    ),
-                )
 
         reporter.complete(summary=f"{len(chapters)} chapters")
 
@@ -525,11 +698,12 @@ def _run_ffmpeg_with_progress(
 
 def _whole_file_chapter(y, sr, duration_ms: int) -> Chapter:
     """Return a single chapter spanning the entire file."""
-    content_type, confidence, evidence = _classify_content(y, sr)
+    content_type, voice_label, confidence, evidence = _classify_content(y, sr)
     return Chapter(
         at_ms=0,
         end_ms=duration_ms,
         content_type=content_type,
+        voice_label=voice_label,
         confidence=confidence,
         evidence=evidence,
     )
@@ -572,18 +746,31 @@ def _detect_chapters(
         min_duration_s=target_seconds * _MIN_CHAPTER_FRACTION,
     )
 
+    # Enforce a maximum chapter duration. Uniform audio (no scene
+    # changes, no silence) can produce a single multi-target-length
+    # chapter that breaks downstream editing — see LongandCut_hdr
+    # 2026-05-22, one 10-min chapter → 4.5 GB clip → player OOM. Split
+    # any over-long gap into even chunks as a fallback; cuts here don't
+    # snap to silence (none was found, by hypothesis) but at least the
+    # editing surface gets reasonable bands.
+    cuts_s = _enforce_max_chapter_duration(
+        cuts_s,
+        max_duration_s=target_seconds * _MAX_CHAPTER_MULTIPLE,
+    )
+
     chapters: list[Chapter] = []
     for i in range(len(cuts_s) - 1):
         start_s = cuts_s[i]
         end_s = cuts_s[i + 1]
         progress(f"Classifying chapter {i + 1}/{len(cuts_s) - 1}…")
-        content_type, confidence, evidence = _classify_content(
+        content_type, voice_label, confidence, evidence = _classify_content(
             _slice_audio(y, sr, start_s, end_s), sr,
         )
         chapters.append(Chapter(
             at_ms=int(round(start_s * 1000)),
             end_ms=int(round(end_s * 1000)),
             content_type=content_type,
+            voice_label=voice_label,
             confidence=confidence,
             evidence=evidence,
         ))
@@ -695,6 +882,47 @@ def _merge_micro_chapters(
     return kept
 
 
+def _enforce_max_chapter_duration(
+    cuts_s: list[float],
+    *,
+    max_duration_s: float,
+) -> list[float]:
+    """Insert evenly-spaced cuts in any gap longer than ``max_duration_s``.
+
+    Final fallback for content with no detectable structural boundaries.
+    The clustering + silence-snap pipeline can return a single very long
+    chapter when audio is uniform — that breaks downstream editing (one
+    multi-GB clip, no useful bands). Splitting evenly is not as good as
+    snapping to natural transitions, but it bounds the chapter length so
+    the editing surface stays usable.
+
+    Args:
+        cuts_s: Ordered cut list including 0.0 and duration.
+        max_duration_s: Hard cap on chapter duration. Gaps larger than
+            this get N evenly-spaced cuts where N is chosen so each
+            resulting sub-chapter is below the cap.
+
+    Returns:
+        Cut list with no consecutive gap exceeding ``max_duration_s``.
+    """
+    if max_duration_s <= 0 or len(cuts_s) < 2:
+        return list(cuts_s)
+    out = [cuts_s[0]]
+    for i in range(1, len(cuts_s)):
+        gap = cuts_s[i] - cuts_s[i - 1]
+        if gap > max_duration_s:
+            # n_extra is the number of interior cuts to insert. We want
+            # each resulting sub-gap to be ≤ max_duration_s, so we need
+            # ceil(gap / max_duration_s) sub-chapters → that many - 1
+            # interior cuts.
+            n_subchapters = int(gap / max_duration_s) + 1
+            step = gap / n_subchapters
+            for k in range(1, n_subchapters):
+                out.append(cuts_s[i - 1] + k * step)
+        out.append(cuts_s[i])
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Content-type heuristic
 # ---------------------------------------------------------------------------
@@ -706,24 +934,28 @@ def _slice_audio(y, sr: int, start_s: float, end_s: float):
     return y[a:b]
 
 
-def _classify_content(y, sr: int) -> tuple[str, float, list[str]]:
-    """Crude content-type heuristic: music / ambient / mixed.
+def _classify_content(y, sr: int) -> tuple[str, str, float, list[str]]:
+    """Texture + voice classification for one chapter slice.
 
-    Looks at:
-    - **rms_variance** — high in music (kick + snare swings), low in
-      ambient steady-state material
-    - **percussive_ratio** — fraction of energy in the percussive HPSS
-      component; high in music, low in ambient
-    - **spectral_flux** — frame-to-frame spectral change; high in music
-      with clear transients
+    Two independent axes:
 
-    Returns ``(content_type, confidence, evidence_list)``. Confidence
-    is a rough scalar in ``[0.5, 1.0]`` reflecting how strongly the
-    features cluster on one type vs. the others — meant for sorting,
-    not for hard thresholding.
+    - **texture** (``driving`` / ``calm`` / ``varied``) — same three-
+      feature heuristic as before (rms_variance + percussive_ratio +
+      spectral_flux), with renamed labels that describe the texture
+      honestly rather than guessing at music-vs-ambient. See
+      :data:`_TEXTURE_DRIVING` etc. for the rename rationale.
+    - **voice** (``talk`` / empty) — Silero VAD speech fraction over
+      the slice. ``talk`` when ratio ≥ :data:`_VOICE_RATIO_TALK`,
+      empty otherwise. Round 1 ships binary; sing/react land later.
+
+    Returns ``(texture_label, voice_label, confidence, evidence)``.
+    Confidence reflects only the texture heuristic — voice is a
+    binary detector, not a score. Evidence may include the marker
+    ``voice_vad`` when voice was detected so consumers can tell the
+    label came from VAD rather than something else.
     """
     if len(y) < sr:  # < 1 second — can't classify
-        return "", 0.0, []
+        return "", "", 0.0, []
 
     rms = _librosa.feature.rms(y=y)[0]
     rms_variance = float(_np.var(rms))
@@ -771,14 +1003,32 @@ def _classify_content(y, sr: int) -> tuple[str, float, list[str]]:
     if flux_score_norm < 0.15:
         ambient_score += 0.30
 
+    # Voice axis runs independently of texture — VAD speech fraction.
+    # Adds 'voice_vad' to evidence when present so consumers can tell the
+    # voice label came from the VAD pass rather than authored.
+    voice_ratio = _compute_voice_ratio(y, sr)
+    voice_label = _VOICE_TALK if voice_ratio >= _VOICE_RATIO_TALK else _VOICE_NONE
+    if voice_label:
+        evidence.append("voice_vad")
+
     if music_score >= 0.6 and music_score > ambient_score + 0.2:
-        return "music", round(min(1.0, 0.5 + music_score / 2.0), 3), evidence
+        return (
+            _TEXTURE_DRIVING, voice_label,
+            round(min(1.0, 0.5 + music_score / 2.0), 3),
+            evidence,
+        )
     if ambient_score >= 0.6 and ambient_score > music_score + 0.2:
         if not evidence:
             evidence = ["rms_variance", "percussive_ratio"]
-        return "ambient", round(min(1.0, 0.5 + ambient_score / 2.0), 3), evidence
-    return "mixed", round(0.5 + abs(music_score - ambient_score) / 4.0, 3), (
-        evidence or ["rms_variance"]
+        return (
+            _TEXTURE_CALM, voice_label,
+            round(min(1.0, 0.5 + ambient_score / 2.0), 3),
+            evidence,
+        )
+    return (
+        _TEXTURE_VARIED, voice_label,
+        round(0.5 + abs(music_score - ambient_score) / 4.0, 3),
+        evidence or ["rms_variance"],
     )
 
 
