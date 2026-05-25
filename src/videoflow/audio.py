@@ -194,6 +194,7 @@ def analyze_beats(
     progress_callback=None,
     on_progress: OnProgress | None = None,
     chapters: list["Chapter"] | None = None,
+    _reporter: "ProgressReporter | None" = None,
 ) -> AudioBeatMap:
     """Analyse the beat structure of an audio or video file.
 
@@ -291,7 +292,13 @@ def analyze_beats(
             f"locked_bpm must be positive, got {locked_bpm!r}"
         )
 
-    reporter = ProgressReporter(on_progress)
+    # Reporter inheritance: callers that already opened a stage stack
+    # (e.g. structural.auto_chapter's `beats` stage) can pass their own
+    # reporter so this function's sub-stages emit at depths nested under
+    # theirs. Without inheritance the inner stages emitted at "their"
+    # depth 2, colliding with structural's depth-2 leaf names in the
+    # consumer's progress footer (2026-05-25 footer-collision bug).
+    reporter = _reporter or ProgressReporter(on_progress)
 
     def _progress(label: str) -> None:
         # Thin shim so callers don't have to null-check. We swallow any

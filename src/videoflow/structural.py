@@ -404,10 +404,18 @@ def auto_chapter(
 
             with reporter.stage("beats"):
                 _progress("Analysing beats and energy…")
+                # Share our reporter so analyze_beats's inner sub-stages
+                # (audio.analyze → extract / load / hpss / chapters /
+                # track) emit at depths nested under "beats" rather than
+                # starting their own depth counter. Without this the
+                # inner `chapters` / `extract` / `load` leaf names
+                # collided with structural's depth-2 stages in the
+                # consumer's progress footer.
                 beat_map = _analyze_beats(
                     audio_path, sr=sr_,
                     chapters=chapters,
                     on_progress=on_progress,
+                    _reporter=reporter,
                 )
                 reporter.complete(
                     summary=(
