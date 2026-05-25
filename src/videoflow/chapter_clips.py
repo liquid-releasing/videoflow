@@ -36,7 +36,17 @@ from typing import Iterable
 # packet caused by `-ss` before `-i` fast-seeking to the nearest video
 # keyframe. Chromium rejects negative-TS packets; `make_zero` shifts
 # the whole stream so the smallest TS lands at 0.
-CACHE_VERSION = "v11"
+#
+# v12: Conditional 720p downscale for sources wider than 1920px.
+# Extraction time on 4K sources drops ~10x (multi-GB clip → ~100MB at
+# 720p) and the WebView2 OOM cliff at multi-GB blobs goes away. CRF
+# tightened to 20 (vs 23) because lanczos downsampling cleans up the
+# codec input; explicit BT.709 color flags preserve graded-source
+# iris coloring through the re-encode. HDR sources (BT.2020) get
+# tonemap-less conversion to BT.709 — acceptable for editor preview
+# since the funscript output is colour-agnostic. SDR (≤1920px) keeps
+# the v11 args verbatim.
+CACHE_VERSION = "v12"
 
 # ffmpeg encode args. Match the Rust command verbatim — frontend's Rust
 # fallback must produce identical output for a given (media, start, end).
@@ -78,6 +88,52 @@ FFMPEG_CLIP_ARGS: tuple[str, ...] = (
     "-y",
 )
 
+
+# Encode args for sources wider than 1920px (4K and above). Lanczos
+# downscale to 1280x720 + explicit BT.709 color flags. Chapter clips
+# are editor previews — 720p is plenty for "click chapter → watch it
+# play to decide what to edit," and the size/decode win pays off
+# everywhere: extraction time, WebView2 memory, disk space.
+#
+# CRF 20 (vs the SDR path's 23) because lanczos downsampling cleans
+# noise out of the codec input, so we can afford a tighter quantizer
+# without paying file-size cost. Color flags are critical for graded
+# sources — without them ffmpeg drops color metadata on re-encode and
+# iris coloring reads desaturated next to the source.
+#
+# HDR / BT.2020 sources: tonemap-less conversion to SDR BT.709.
+# Acceptable for editor preview (the funscript output ignores pixel
+# colour); proper HDR tonemapping would require zscale and a heavier
+# pipeline. See [[project-funscriptforge-pending]] 4K downsize block.
+FFMPEG_CLIP_ARGS_4K_DOWNSCALE: tuple[str, ...] = (
+    "-c:v", "libx264",
+    "-profile:v", "baseline",
+    "-level", "3.1",
+    "-preset", "ultrafast",
+    "-crf", "20",
+    "-pix_fmt", "yuv420p",
+    "-r", "30",
+    "-vf", "scale=1280:720:flags=lanczos",
+    "-color_primaries", "bt709",
+    "-color_trc", "bt709",
+    "-colorspace", "bt709",
+    "-color_range", "tv",
+    "-c:a", "aac",
+    "-b:a", "192k",
+    "-ar", "48000",
+    "-ac", "2",
+    "-avoid_negative_ts", "make_zero",
+    "-movflags", "+faststart",
+    "-f", "mp4",
+    "-y",
+)
+
+# Sources wider than this trigger the 4K downscale path. 1920 catches
+# 4K (3840), 5K (5120), 8K (7680) and any odd resolution between
+# 1080p and 4K (e.g. 2560-wide 1440p). 1080p sources keep the v11
+# args verbatim — they don't need the downscale.
+DOWNSCALE_WIDTH_THRESHOLD: int = 1920
+
 # Default extension when the source doesn't carry one. mp4 is what
 # Chromium plays best and what every editor input is converted to.
 _DEFAULT_EXT = "mp4"
@@ -93,6 +149,41 @@ _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 def _sanitize_stem(stem: str) -> str:
     """Reduce a filename stem to ``[A-Za-z0-9_.-]``-only characters."""
     return _SAFE_STEM_RE.sub("_", stem).strip("._") or "media"
+
+
+# Match ffmpeg's stream-info line. ffmpeg prints "Stream #N:M(...) :
+# Video: codec ..., pix_fmt, WIDTHxHEIGHT [bracketed metadata]" to
+# stderr for each video stream. The first numeric WxH on a Video
+# line is the source resolution; later WxH on the same line are SAR
+# / display dimensions that we don't care about.
+_PROBE_RESOLUTION_RE = re.compile(
+    r"Stream #\d+:\d+[^\n]*?Video:[^\n]*?\b(\d{3,5})x(\d{3,5})\b"
+)
+
+
+def _probe_video_dimensions(
+    media_path: str | Path, ffmpeg: str,
+) -> tuple[int, int] | None:
+    """Probe ``(width, height)`` of the source's first video stream.
+
+    Runs ``ffmpeg -i <path>`` with no output specified. ffmpeg prints
+    stream info to stderr and exits 1 because there's no output file —
+    that's expected. Returns ``None`` if the probe couldn't find a
+    Video stream line (audio-only file, unreadable format, ffmpeg not
+    found, etc.); callers fall back to the safe default encode args
+    on ``None``.
+    """
+    args = [ffmpeg, "-hide_banner", "-loglevel", "info", "-i", str(media_path)]
+    try:
+        proc = subprocess.run(
+            args, capture_output=True, text=True, creationflags=_NO_WINDOW,
+        )
+    except (FileNotFoundError, OSError):
+        return None
+    match = _PROBE_RESOLUTION_RE.search(proc.stderr or "")
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
 
 
 def chapter_clips_dir(media_path: str | Path) -> Path:
@@ -189,6 +280,17 @@ def extract_chapter_clip(
     # with "Unable to choose an output format" (2026-05-22 dogfood).
     tmp = out.parent / f"{out.stem}.tmp.{os.getpid()}{out.suffix}"
 
+    # Pick encode args based on source resolution. Probe is cheap
+    # (ffmpeg reads the header only) and runs once per clip. A failed
+    # probe (None) falls through to the SDR args — safer to keep the
+    # original 4K bytes than to corrupt a clip from an unreadable
+    # source.
+    dims = _probe_video_dimensions(media_path, ffmpeg)
+    if dims is not None and dims[0] > DOWNSCALE_WIDTH_THRESHOLD:
+        encode_args: tuple[str, ...] = FFMPEG_CLIP_ARGS_4K_DOWNSCALE
+    else:
+        encode_args = FFMPEG_CLIP_ARGS
+
     args: list[str] = [
         ffmpeg,
         "-hide_banner",
@@ -196,7 +298,7 @@ def extract_chapter_clip(
         "-ss", f"{start_ms / 1000:.3f}",
         "-to", f"{end_ms / 1000:.3f}",
         "-i", str(media_path),
-        *FFMPEG_CLIP_ARGS,
+        *encode_args,
         str(tmp),
     ]
     proc = subprocess.run(
