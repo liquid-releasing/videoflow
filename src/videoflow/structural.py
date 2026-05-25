@@ -373,6 +373,35 @@ def auto_chapter(
                         summary=f"{len(chapters)} chapters detected",
                     )
 
+            # Early chapter sidecar — write the chapter list to disk as
+            # soon as detection finishes, without waiting for beats /
+            # classify / audio sidecars. The editor's chapter strip
+            # listens for this event and populates immediately; the
+            # later `sidecar` stage field-merges phrases + energy into
+            # the same file. Trades a tiny extra write for a much
+            # tighter "I clicked Analyze, when do I see chapters?" loop.
+            if write_sidecar:
+                with reporter.stage("chapters_sidecar"):
+                    _progress("Writing chapter sidecar…")
+                    _write_sidecar(
+                        media_path,
+                        {
+                            "chapters": [c.to_dict() for c in chapters],
+                            "generated_by": {
+                                "tool": "videoflow.structural",
+                                "tool_version": _videoflow_version(),
+                                "target_minutes": target_minutes,
+                                "stage": "partial",
+                            },
+                        },
+                        writer="videoflow.structural",
+                        writer_version=_videoflow_version(),
+                        mode="analyze",
+                    )
+                    reporter.complete(
+                        summary=f"{len(chapters)} chapters on disk",
+                    )
+
             with reporter.stage("beats"):
                 _progress("Analysing beats and energy…")
                 beat_map = _analyze_beats(
@@ -453,17 +482,19 @@ def auto_chapter(
                             ),
                         )
 
-                # Chapters sidecar is written BEFORE chapter_clips so
-                # the editor's chapter strip lights up the moment chapter
-                # data is on disk — not after the long per-chapter clip
-                # extraction. On 4K sources clip extraction can run for
-                # several minutes (each clip is multi-GB); without this
-                # ordering the user stares at an empty chapter strip
-                # while extraction grinds. clips remain useful (instant
-                # chapter playback) but they're no longer load-bearing
-                # for the chapter strip rendering.
+                # Final sidecar merge — adds `phrases` + `energy` to the
+                # chapters-only file already on disk (from the earlier
+                # `chapters_sidecar` stage right after `detect`). The
+                # `write_sidecar` helper does a field-level merge so the
+                # existing `chapters` entries stay put; phrases/energy
+                # become available to the editor as a follow-up paint.
                 #
-                # Order: audio sidecars → chapters sidecar → chapter_clips.
+                # Order: chapters_sidecar (after detect) → beats →
+                # classify → audio_peaks → spectrogram → audio_beats →
+                # sidecar (this stage, merges phrases + energy) →
+                # chapter_clips. The chapter strip lights up after
+                # `chapters_sidecar`; chapter clips can still take
+                # several minutes on 4K sources without blocking the UI.
                 # See [[project-funscriptforge-pending]] ("when do we
                 # show the chapters?" UX fix, 2026-05-24).
                 with reporter.stage("sidecar"):
