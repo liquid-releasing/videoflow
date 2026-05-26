@@ -225,10 +225,10 @@ def cmd_analyze_beats(args: argparse.Namespace) -> int:
         "duration_ms": beat_map.duration_ms,
         "beat_count": len(beat_map.beats),
         "downbeat_count": len(beat_map.downbeats),
-        "phrase_count": len(beat_map.phrases),
+        "stanza_count": len(beat_map.stanzas),
         "beats": beat_map.beats,
         "downbeats": beat_map.downbeats,
-        "phrases": [{"start_ms": s, "end_ms": e} for s, e in beat_map.phrases],
+        "stanzas": [{"start_ms": s, "end_ms": e} for s, e in beat_map.stanzas],
         "energy": [round(e, 4) for e in beat_map.energy],
     }
 
@@ -243,7 +243,7 @@ def cmd_analyze_beats(args: argparse.Namespace) -> int:
         print(f"duration:     {beat_map.duration_ms / 1000:.1f}s")
         print(f"beats:        {len(beat_map.beats)}")
         print(f"downbeats:    {len(beat_map.downbeats)}")
-        print(f"phrases:      {len(beat_map.phrases)}")
+        print(f"stanzas:      {len(beat_map.stanzas)}")
         print(f"beat interval: {beat_map.beat_interval_ms:.0f}ms")
         if args.beats:
             for i, b in enumerate(beat_map.beats):
@@ -435,7 +435,7 @@ def cmd_generate_funscript(args: argparse.Namespace) -> int:
                 high=args.high,
                 center=args.center,
                 center_trajectory=traj,
-                tone_per_phrase=auto_tone,
+                tone_per_stanza=auto_tone,
                 energy_normalize=args.energy_normalize,
                 stroke_density=args.stroke_density,
                 title=args.title or "",
@@ -449,7 +449,7 @@ def cmd_generate_funscript(args: argparse.Namespace) -> int:
         "output": str(output),
         "bpm": round(beat_map.bpm, 2),
         "beats": len(beat_map.beats),
-        "phrases": len(beat_map.phrases),
+        "stanzas": len(beat_map.stanzas),
         "duration_ms": beat_map.duration_ms,
     }
 
@@ -457,7 +457,7 @@ def cmd_generate_funscript(args: argparse.Namespace) -> int:
         print(f"output:   {output}")
         print(f"bpm:      {beat_map.bpm:.1f}")
         print(f"beats:    {len(beat_map.beats)}")
-        print(f"phrases:  {len(beat_map.phrases)}")
+        print(f"stanzas:  {len(beat_map.stanzas)}")
         print(f"duration: {beat_map.duration_ms / 1000:.1f}s")
     else:
         print(json.dumps(data, indent=2))
@@ -795,7 +795,7 @@ def build_parser() -> argparse.ArgumentParser:
         "auto-chapter",
         help=(
             "Detect natural chapter boundaries and write the structural "
-            "<stem>.chapters.json sidecar (chapters + phrases + energy)."
+            "<stem>.chapters.json sidecar (chapters + stanzas + energy)."
         ),
     )
     p_auto.add_argument("input", type=Path, help="Input audio or video file.")
@@ -905,8 +905,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="flat",
         help="Whole-shape gestalt for the curve. flat (default): constant "
              "center 50. rise: center drifts 30→70 over the track. fall: "
-             "70→30. auto: per-phrase center swing derived from each "
-             "phrase's energy slope — rising phrases climb, falling ones "
+             "70→30. auto: per-stanza center swing derived from each "
+             "stanza's energy slope — rising stanzas climb, falling ones "
              "relax. Works on drones too (energy moves even without melody).",
     )
     p_gen.add_argument(

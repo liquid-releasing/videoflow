@@ -68,7 +68,7 @@ class TestRead(unittest.TestCase):
             doc = read_sidecar(media)
             self.assertIsNotNone(doc)
             self.assertEqual(doc["chapters"], [{"at_ms": 0, "name": "intro"}])
-            self.assertEqual(doc["phrases"], [])
+            self.assertEqual(doc["stanzas"], [])
             self.assertEqual(doc["provenance"], [])
 
     def test_reads_bare_list_as_chapters(self):
@@ -110,13 +110,13 @@ class TestRead(unittest.TestCase):
             with self.assertRaises(SidecarError):
                 read_sidecar(media)
 
-    def test_raises_on_invalid_phrase_mode(self):
+    def test_raises_on_invalid_stanza_mode(self):
         with TemporaryDirectory() as td:
             media = _media(td)
             _chapters(td).write_text(
                 json.dumps({
                     "chapters": [{"at_ms": 0}],
-                    "phrases": [{
+                    "stanzas": [{
                         "chapter_idx": 0, "at_ms": 0, "end_ms": 1000,
                         "mode": "not-a-mode",
                     }],
@@ -132,14 +132,14 @@ class TestRead(unittest.TestCase):
             media = _media(td)
             _chapters(td).write_text(json.dumps({
                 "chapters": [{"at_ms": 0}],
-                "phrases": [
+                "stanzas": [
                     {"chapter_idx": 0, "at_ms": 0, "end_ms": 1000, "mode": "fast"},
                     {"chapter_idx": 0, "at_ms": 1000, "end_ms": 2000, "mode": "slow"},
                 ],
             }), encoding="utf-8")
             doc = read_sidecar(media)
-            self.assertEqual(doc["phrases"][0]["mode"], "fast")
-            self.assertEqual(doc["phrases"][1]["mode"], "slow")
+            self.assertEqual(doc["stanzas"][0]["mode"], "fast")
+            self.assertEqual(doc["stanzas"][1]["mode"], "slow")
 
     def test_accepts_locked_tone_vocabulary(self):
         with TemporaryDirectory() as td:
@@ -501,13 +501,13 @@ class TestProvenance(unittest.TestCase):
             media = _media(td)
             write_sidecar(media, {
                 "chapters": [{"at_ms": 0}],
-                "phrases": [{"chapter_idx": 0, "at_ms": 0, "end_ms": 100}],
+                "stanzas": [{"chapter_idx": 0, "at_ms": 0, "end_ms": 100}],
                 "energy": {"percentiles": {"p5": 0, "p25": 0, "p50": 0,
                                            "p75": 0, "p95": 0}},
             }, writer="videoflow.structural")
             doc = json.loads(_chapters(td).read_text())
             fields = doc["provenance"][0]["fields"]
-            self.assertEqual(set(fields), {"chapters", "phrases", "energy"})
+            self.assertEqual(set(fields), {"chapters", "stanzas", "energy"})
 
 
 # ---------------------------------------------------------------------------

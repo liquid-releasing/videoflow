@@ -53,8 +53,8 @@ class AudioBeatMap:
     V1 assumes 4/4 time — every 4th beat.
     """
 
-    phrases: list[tuple[int, int]]
-    """(start_ms, end_ms) of each musical phrase.
+    stanzas: list[tuple[int, int]]
+    """(start_ms, end_ms) of each musical stanza.
 
     V1 groups every 16 beats (4 bars of 4/4).
     """
@@ -89,7 +89,7 @@ class AudioBeatMap:
             "duration_ms": self.duration_ms,
             "beats": self.beats,
             "downbeats": self.downbeats,
-            "phrases": [{"start_ms": s, "end_ms": e} for s, e in self.phrases],
+            "stanzas": [{"start_ms": s, "end_ms": e} for s, e in self.stanzas],
             "energy": [round(e, 6) for e in self.energy],
         }
 
@@ -134,7 +134,7 @@ class AudioBeatMap:
                 duration_ms=int(data["duration_ms"]),
                 beats=[int(b) for b in data["beats"]],
                 downbeats=[int(b) for b in data["downbeats"]],
-                phrases=[(int(p["start_ms"]), int(p["end_ms"])) for p in data["phrases"]],
+                stanzas=[(int(p["start_ms"]), int(p["end_ms"])) for p in data["stanzas"]],
                 energy=[float(e) for e in data["energy"]],
             )
         except (KeyError, TypeError, ValueError) as exc:
@@ -255,7 +255,7 @@ def analyze_beats(
                 by a loud climax's RMS distribution. Each chapter also
                 gets its own tracker resolution (a 5-minute climax chunk
                 resolves ``tracker="auto"`` differently than a 5-minute
-                quiet intro). Beats / phrases / energy are concatenated
+                quiet intro). Beats / stanzas / energy are concatenated
                 in chapter order; the reported ``bpm`` is the
                 duration-weighted mean of per-chapter BPMs. Pass ``None``
                 (default) for whole-file analysis.
@@ -271,7 +271,7 @@ def analyze_beats(
                 callback are swallowed.
 
     Returns:
-        :class:`AudioBeatMap` with bpm, beats, downbeats, phrases, energy,
+        :class:`AudioBeatMap` with bpm, beats, downbeats, stanzas, energy,
         and duration_ms.
 
     Raises:
@@ -389,7 +389,7 @@ def analyze_beats(
 
             if chapters:
                 with reporter.stage("chapters"):
-                    bpm, beats_ms, downbeats_ms, phrases, energy = _analyze_per_chapter(
+                    bpm, beats_ms, downbeats_ms, stanzas, energy = _analyze_per_chapter(
                         y_track, sr_, duration_ms,
                         chapters=chapters,
                         tracker=tracker,
@@ -405,7 +405,7 @@ def analyze_beats(
                     )
             else:
                 with reporter.stage("track"):
-                    bpm, beats_ms, downbeats_ms, phrases, energy = _analyze_buffer(
+                    bpm, beats_ms, downbeats_ms, stanzas, energy = _analyze_buffer(
                         y_track, sr_, duration_ms,
                         tracker=tracker,
                         locked_bpm=locked_bpm,
@@ -427,7 +427,7 @@ def analyze_beats(
         reporter.complete(
             summary=(
                 f"BPM {bpm:.0f} · {len(beats_ms)} beats · "
-                f"{len(phrases)} phrases"
+                f"{len(stanzas)} stanzas"
             ),
         )
 
@@ -435,7 +435,7 @@ def analyze_beats(
         bpm=bpm,
         beats=beats_ms,
         downbeats=downbeats_ms,
-        phrases=phrases,
+        stanzas=stanzas,
         energy=energy,
         duration_ms=duration_ms,
     )
@@ -455,9 +455,9 @@ def _analyze_buffer(
     progress,
     time_offset_ms: int,
 ) -> tuple[float, list[int], list[int], list[tuple[int, int]], list[float]]:
-    """Run the beat / phrase / energy pipeline on one buffer.
+    """Run the beat / stanza / energy pipeline on one buffer.
 
-    Returns ``(bpm, beats_ms, downbeats_ms, phrases, energy)``. All
+    Returns ``(bpm, beats_ms, downbeats_ms, stanzas, energy)``. All
     timestamps are shifted by ``time_offset_ms`` so the result can be
     placed at any position in a longer timeline. Energy is normalised
     *within this buffer only* — that's the per-chunk normalisation lever
@@ -509,14 +509,14 @@ def _analyze_buffer(
         )
         beats_ms = [round(float(t) * 1000) + time_offset_ms for t in beat_times]
 
-    progress("Computing phrases + per-beat energy…")
+    progress("Computing stanzas + per-beat energy…")
     downbeats_ms = beats_ms[::4]
 
-    phrases: list[tuple[int, int]] = []
+    stanzas: list[tuple[int, int]] = []
     for i in range(0, len(beats_ms), 16):
         start = beats_ms[i]
         end = beats_ms[min(i + 16, len(beats_ms) - 1)]
-        phrases.append((start, end))
+        stanzas.append((start, end))
 
     rms = _librosa.feature.rms(y=y_track)[0]
     energy_raw = [
@@ -525,7 +525,7 @@ def _analyze_buffer(
     max_e = max(energy_raw) if energy_raw else 1.0
     energy = [e / max_e if max_e > 0 else 0.0 for e in energy_raw]
 
-    return bpm, beats_ms, downbeats_ms, phrases, energy
+    return bpm, beats_ms, downbeats_ms, stanzas, energy
 
 
 def _analyze_per_chapter(
@@ -541,9 +541,9 @@ def _analyze_per_chapter(
 ) -> tuple[float, list[int], list[int], list[tuple[int, int]], list[float]]:
     """Run :func:`_analyze_buffer` per chapter and stitch the results.
 
-    Each chapter is analysed in isolation — beat tracking, phrase
+    Each chapter is analysed in isolation — beat tracking, stanza
     grouping, AND energy normalisation all happen against the chunk's
-    own audio. Then beats / downbeats / phrases / energies are
+    own audio. Then beats / downbeats / stanzas / energies are
     concatenated in chapter order; the reported BPM is the
     duration-weighted mean of per-chapter BPMs.
 
@@ -559,7 +559,7 @@ def _analyze_per_chapter(
 
     all_beats: list[int] = []
     all_downbeats: list[int] = []
-    all_phrases: list[tuple[int, int]] = []
+    all_stanzas: list[tuple[int, int]] = []
     all_energy: list[float] = []
     weighted_bpm = 0.0
     total_weight = 0
@@ -587,7 +587,7 @@ def _analyze_per_chapter(
             continue
 
         with chapter_ctx:
-            chunk_bpm, chunk_beats, chunk_db, chunk_phrases, chunk_energy = _analyze_buffer(
+            chunk_bpm, chunk_beats, chunk_db, chunk_stanzas, chunk_energy = _analyze_buffer(
                 y_chunk, sr, chunk_duration_ms,
                 tracker=tracker, locked_bpm=locked_bpm,
                 progress=progress, time_offset_ms=ch.at_ms,
@@ -600,10 +600,10 @@ def _analyze_per_chapter(
                 )
         all_beats.extend(chunk_beats)
         all_downbeats.extend(chunk_db)
-        all_phrases.extend(chunk_phrases)
+        all_stanzas.extend(chunk_stanzas)
         all_energy.extend(chunk_energy)
         weighted_bpm += chunk_bpm * chunk_duration_ms
         total_weight += chunk_duration_ms
 
     bpm = weighted_bpm / total_weight if total_weight > 0 else 0.0
-    return bpm, all_beats, all_downbeats, all_phrases, all_energy
+    return bpm, all_beats, all_downbeats, all_stanzas, all_energy

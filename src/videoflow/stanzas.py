@@ -1,24 +1,24 @@
-"""Phrase classification — audio-driven and funscript-driven.
+"""Stanza classification — audio-driven and funscript-driven.
 
-A phrase is a within-chapter intent unit. Two classifiers, one record:
+A stanza is a within-chapter intent unit. Two classifiers, one record:
 
-- :func:`classify_phrases` reads :class:`videoflow.audio.AudioBeatMap`
-  and labels each musical phrase with a behavioural mode (``tease``,
+- :func:`classify_stanzas` reads :class:`videoflow.audio.AudioBeatMap`
+  and labels each musical stanza with a behavioural mode (``tease``,
   ``steady``, ``edging``, etc.) using audio-energy and tempo signals.
-- :func:`classify_phrases_from_funscript` reads a funscript's actions
+- :func:`classify_stanzas_from_funscript` reads a funscript's actions
   and applies the same mode vocabulary using stroke-amplitude and
   stroke-rate signals instead of audio energy. Useful when a user has
-  hand-edited the funscript and wants phrase classifications that
+  hand-edited the funscript and wants stanza classifications that
   match the edited curve rather than the source audio.
 
-Both produce the same :class:`Phrase` shape — only the ``source`` field
+Both produce the same :class:`Stanza` shape — only the ``source`` field
 differs (``"audio"`` vs ``"funscript"``). Records round-trip through the
-sidecar via :meth:`Phrase.to_dict` / :meth:`Phrase.from_dict` and feed
+sidecar via :meth:`Stanza.to_dict` / :meth:`Stanza.from_dict` and feed
 the merge contract in :mod:`videoflow.sidecar`.
 
 The legacy tuple-shaped :func:`classify_modes` API is preserved here as
 a thin wrapper for back-compat with v0.0.4 callers (forgegen, the CLI,
-and existing tests). New code should prefer :func:`classify_phrases`.
+and existing tests). New code should prefer :func:`classify_stanzas`.
 """
 
 from __future__ import annotations
@@ -32,11 +32,11 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# Phrase record
+# Stanza record
 # ---------------------------------------------------------------------------
 
 @dataclasses.dataclass
-class Phrase:
+class Stanza:
     """A within-chapter intent unit with classified mode + provenance.
 
     See ``videoflow/docs/architecture/audio-structure-primitive.md``
@@ -46,8 +46,8 @@ class Phrase:
     Attributes:
         chapter_idx: 0-based index into the sidecar's chapters list.
             STRUCTURAL.
-        at_ms: Phrase start in milliseconds. STRUCTURAL.
-        end_ms: Phrase end in milliseconds. STRUCTURAL.
+        at_ms: Stanza start in milliseconds. STRUCTURAL.
+        end_ms: Stanza end in milliseconds. STRUCTURAL.
         mode: Behavioural mode label — one of ``tease`` / ``steady`` /
             ``edging`` / ``break`` / ``fast`` / ``slow`` (or empty
             string for unclassified). ANALYTICAL.
@@ -55,14 +55,14 @@ class Phrase:
             ``None`` when the classifier is rule-based and binary.
             ANALYTICAL.
         source: Where the classification came from. ``"audio"`` =
-            :func:`classify_phrases` from an AudioBeatMap; ``"funscript"``
-            = :func:`classify_phrases_from_funscript`; ``"user"`` = a UI
+            :func:`classify_stanzas` from an AudioBeatMap; ``"funscript"``
+            = :func:`classify_stanzas_from_funscript`; ``"user"`` = a UI
             edit; ``""`` = unknown / from a sidecar that didn't record
             it. ANALYTICAL.
-        intent: Phrase-intent vocabulary (``intro`` / ``build`` /
+        intent: Stanza-intent vocabulary (``intro`` / ``build`` /
             ``sustain`` / ``edge`` / ``climax`` / ``recover`` /
             ``outro``). AUTHORED.
-        tone: Optional FunscriptForge tone override for this phrase.
+        tone: Optional FunscriptForge tone override for this stanza.
             MIXED.
         evidence: Identifiers of the features that fired. ANALYTICAL.
         auto_generated: Per-record latch. ``False`` freezes the record
@@ -83,7 +83,7 @@ class Phrase:
     def to_dict(self) -> dict:
         """Return a JSON-serialisable dict.
 
-        Omits optional fields at their defaults so authored phrases
+        Omits optional fields at their defaults so authored stanzas
         stay compact. The shape matches the schema documented in
         ``audio-structure-primitive.md``.
         """
@@ -108,8 +108,8 @@ class Phrase:
         return out
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Phrase":
-        """Parse a phrase dict from a sidecar.
+    def from_dict(cls, data: dict) -> "Stanza":
+        """Parse a stanza dict from a sidecar.
 
         Raises:
             ValueError: If ``chapter_idx`` / ``at_ms`` / ``end_ms`` are
@@ -117,7 +117,7 @@ class Phrase:
         """
         for required in ("chapter_idx", "at_ms", "end_ms"):
             if required not in data:
-                raise ValueError(f"phrase missing '{required}': {data!r}")
+                raise ValueError(f"stanza missing '{required}': {data!r}")
         confidence = data.get("confidence")
         if confidence is not None:
             confidence = float(confidence)
@@ -149,11 +149,11 @@ def classify_modes(
     *,
     chapters: list | None = None,
 ) -> list[tuple[int, int, str]]:
-    """Label each musical phrase with a behavioural mode (tuple API).
+    """Label each musical stanza with a behavioural mode (tuple API).
 
     Modes are rule-based — no ML. Two regimes:
 
-    **Whole-file** (default, ``chapters=None``): phrase-level energy
+    **Whole-file** (default, ``chapters=None``): stanza-level energy
     compared against absolute thresholds.
 
     ======== ================================================================
@@ -171,8 +171,8 @@ def classify_modes(
     **Chapter-aware** (``chapters`` is a list of
     :class:`videoflow.chapters.Chapter`): each chapter computes its own
     energy reference (median + 75th percentile) and BPM (from beat
-    density within the chapter). Phrases are classified relative to
-    their chapter's stats so a quiet phrase in a quiet ambient chunk
+    density within the chapter). Stanzas are classified relative to
+    their chapter's stats so a quiet stanza in a quiet ambient chunk
     isn't auto-mapped to ``break`` just because its absolute energy is
     low — it can still be ``steady`` or ``slow`` if it's average for
     its chapter. This is the lever that fixes the ambient flat-output
@@ -184,25 +184,25 @@ def classify_modes(
             :func:`videoflow.structural.auto_chapter`).
 
     Returns:
-        List of ``(start_ms, end_ms, mode)`` tuples, one per phrase.
+        List of ``(start_ms, end_ms, mode)`` tuples, one per stanza.
         Tuple-shaped for back-compat with v0.0.4 callers; new code
-        should prefer :func:`classify_phrases`, which returns rich
-        :class:`Phrase` records.
+        should prefer :func:`classify_stanzas`, which returns rich
+        :class:`Stanza` records.
     """
     if chapters:
         return _classify_modes_per_chapter(beat_map, chapters)
     return _classify_modes_whole(beat_map)
 
 
-def classify_phrases(
+def classify_stanzas(
     beat_map: "AudioBeatMap",
     *,
     chapters: list | None = None,
-) -> list[Phrase]:
-    """Audio-driven phrase classification with rich :class:`Phrase` records.
+) -> list[Stanza]:
+    """Audio-driven stanza classification with rich :class:`Stanza` records.
 
     Same rules as :func:`classify_modes` (lifted here unchanged); the
-    difference is the return type — :class:`Phrase` records carry
+    difference is the return type — :class:`Stanza` records carry
     ``chapter_idx``, ``source="audio"``, and round-trip cleanly through
     the sidecar.
 
@@ -210,15 +210,15 @@ def classify_phrases(
         beat_map: Result of :func:`videoflow.audio.analyze_beats`.
         chapters: Optional chapter list. Used both as a classification
             regime selector (per-chapter relative thresholds) and to
-            attach ``chapter_idx`` to each phrase record.
+            attach ``chapter_idx`` to each stanza record.
 
     Returns:
-        list[Phrase] with ``source="audio"`` on every record.
+        list[Stanza] with ``source="audio"`` on every record.
     """
     chapter_list = list(chapters) if chapters else []
     tuples = classify_modes(beat_map, chapters=chapter_list or None)
     return [
-        Phrase(
+        Stanza(
             chapter_idx=_chapter_index_at(
                 (start_ms + end_ms) // 2, chapter_list,
             ) if chapter_list else 0,
@@ -239,7 +239,7 @@ def _classify_modes_whole(
     v0.0.4 API and used for short-file analysis where chapter awareness
     adds no value."""
     modes: list[tuple[int, int, str]] = []
-    for start_ms, end_ms in beat_map.phrases:
+    for start_ms, end_ms in beat_map.stanzas:
         indices = [
             i for i, b in enumerate(beat_map.beats)
             if start_ms <= b < end_ms
@@ -247,9 +247,9 @@ def _classify_modes_whole(
         if not indices:
             modes.append((start_ms, end_ms, "break"))
             continue
-        phrase_energy = [beat_map.energy[i] for i in indices]
-        avg = sum(phrase_energy) / len(phrase_energy)
-        trend, _ = _energy_trend(phrase_energy)
+        stanza_energy = [beat_map.energy[i] for i in indices]
+        avg = sum(stanza_energy) / len(stanza_energy)
+        trend, _ = _energy_trend(stanza_energy)
 
         if avg < 0.15:
             mode = "break"
@@ -275,7 +275,7 @@ def _classify_modes_per_chapter(
 
     For each chapter, computes per-chunk median + 75th-percentile beat
     energies and per-chunk BPM (from beat density inside the chunk),
-    then classifies each phrase against THAT chunk's stats. Result:
+    then classifies each stanza against THAT chunk's stats. Result:
     ambient chapters land mostly in ``steady`` instead of being crushed
     to ``break`` / ``tease`` by a whole-file 0.15 / 0.30 cut.
     """
@@ -284,10 +284,10 @@ def _classify_modes_per_chapter(
         ch_start = ch.at_ms
         ch_end = ch.end_ms if ch.end_ms is not None else beat_map.duration_ms
 
-        chunk_phrases = [
-            (s, e) for s, e in beat_map.phrases if ch_start <= s < ch_end
+        chunk_stanzas = [
+            (s, e) for s, e in beat_map.stanzas if ch_start <= s < ch_end
         ]
-        if not chunk_phrases:
+        if not chunk_stanzas:
             continue
 
         chunk_beat_indices = [
@@ -296,7 +296,7 @@ def _classify_modes_per_chapter(
         chunk_energies = [beat_map.energy[i] for i in chunk_beat_indices]
 
         if not chunk_energies:
-            for s, e in chunk_phrases:
+            for s, e in chunk_stanzas:
                 out.append((s, e, "break"))
             continue
 
@@ -317,7 +317,7 @@ def _classify_modes_per_chapter(
         break_threshold = max(chunk_median * 0.4, 0.10)
         tease_threshold = chunk_median * 0.85
 
-        for start_ms, end_ms in chunk_phrases:
+        for start_ms, end_ms in chunk_stanzas:
             ph_indices = [
                 i for i, b in enumerate(beat_map.beats)
                 if start_ms <= b < end_ms
@@ -326,9 +326,9 @@ def _classify_modes_per_chapter(
                 out.append((start_ms, end_ms, "break"))
                 continue
 
-            phrase_energy = [beat_map.energy[i] for i in ph_indices]
-            avg = sum(phrase_energy) / len(phrase_energy)
-            trend, second_avg = _energy_trend(phrase_energy)
+            stanza_energy = [beat_map.energy[i] for i in ph_indices]
+            avg = sum(stanza_energy) / len(stanza_energy)
+            trend, second_avg = _energy_trend(stanza_energy)
 
             if avg < break_threshold:
                 mode = "break"
@@ -347,17 +347,17 @@ def _classify_modes_per_chapter(
     return out
 
 
-def _energy_trend(phrase_energy: list[float]) -> tuple[float, float]:
-    """Per-phrase energy slope: returns ``(trend, second_avg)`` where trend
+def _energy_trend(stanza_energy: list[float]) -> tuple[float, float]:
+    """Per-stanza energy slope: returns ``(trend, second_avg)`` where trend
     is second-half-average minus first-half-average. Returning second_avg
-    too lets callers test "is the phrase peaking?" without recomputing.
+    too lets callers test "is the stanza peaking?" without recomputing.
     """
-    mid = len(phrase_energy) // 2
+    mid = len(stanza_energy) // 2
     if mid <= 0:
-        avg = phrase_energy[0] if phrase_energy else 0.0
+        avg = stanza_energy[0] if stanza_energy else 0.0
         return 0.0, avg
-    first_avg = sum(phrase_energy[:mid]) / mid
-    second_avg = sum(phrase_energy[mid:]) / max(1, len(phrase_energy) - mid)
+    first_avg = sum(stanza_energy[:mid]) / mid
+    second_avg = sum(stanza_energy[mid:]) / max(1, len(stanza_energy) - mid)
     return second_avg - first_avg, second_avg
 
 
@@ -365,18 +365,18 @@ def _energy_trend(phrase_energy: list[float]) -> tuple[float, float]:
 # Funscript-driven classification
 # ---------------------------------------------------------------------------
 
-# Default phrase boundary derivation: group every N actions into one phrase.
+# Default stanza boundary derivation: group every N actions into one stanza.
 # 16 mirrors the audio path's 16-beat grouping (4 bars of 4/4).
-_DEFAULT_FUNSCRIPT_PHRASE_ACTIONS = 16
+_DEFAULT_FUNSCRIPT_STANZA_ACTIONS = 16
 
 
-def classify_phrases_from_funscript(
+def classify_stanzas_from_funscript(
     actions: Iterable[dict],
     *,
     chapters: list | None = None,
-    phrase_boundaries: list[tuple[int, int]] | None = None,
-) -> list[Phrase]:
-    """Classify phrases from funscript actions instead of audio.
+    stanza_boundaries: list[tuple[int, int]] | None = None,
+) -> list[Stanza]:
+    """Classify stanzas from funscript actions instead of audio.
 
     Funscript actions carry timing (``at`` ms) and position (``pos``,
     0–100). Stroke amplitude (peak-to-trough range), stroke density
@@ -406,16 +406,16 @@ def classify_phrases_from_funscript(
             Order is sorted internally.
         chapters: Optional chapter list. When provided, classification
             is chapter-relative (chunk amplitude median sets the
-            reference) and each phrase's ``chapter_idx`` is set
+            reference) and each stanza's ``chapter_idx`` is set
             accordingly. When absent, classification uses absolute
             thresholds.
-        phrase_boundaries: Optional explicit ``(start_ms, end_ms)``
-            phrase segmentation. When ``None``, actions are grouped
-            into 16-action phrases (mirrors AudioBeatMap's 16-beat
+        stanza_boundaries: Optional explicit ``(start_ms, end_ms)``
+            stanza segmentation. When ``None``, actions are grouped
+            into 16-action stanzas (mirrors AudioBeatMap's 16-beat
             grouping).
 
     Returns:
-        list[Phrase] with ``source="funscript"`` on every record.
+        list[Stanza] with ``source="funscript"`` on every record.
     """
     sorted_actions = sorted(
         ({"at": int(a["at"]), "pos": int(a["pos"])} for a in actions),
@@ -426,8 +426,8 @@ def classify_phrases_from_funscript(
 
     chapter_list = list(chapters) if chapters else []
 
-    if phrase_boundaries is None:
-        phrase_boundaries = _segment_actions_into_phrases(sorted_actions)
+    if stanza_boundaries is None:
+        stanza_boundaries = _segment_actions_into_stanzas(sorted_actions)
 
     # Build per-chapter reference stats when chapters are provided.
     chapter_stats: dict[int, _ChapterFunscriptStats] = {}
@@ -445,8 +445,8 @@ def classify_phrases_from_funscript(
                 in_chunk, duration_ms=ch_end - ch.at_ms,
             )
 
-    out: list[Phrase] = []
-    for start_ms, end_ms in phrase_boundaries:
+    out: list[Stanza] = []
+    for start_ms, end_ms in stanza_boundaries:
         ph_actions = [
             a for a in sorted_actions if start_ms <= a["at"] < end_ms
         ]
@@ -456,10 +456,10 @@ def classify_phrases_from_funscript(
         )
         chapter_ref = chapter_stats.get(ch_idx) if chapter_list else None
 
-        mode = _classify_funscript_phrase(
+        mode = _classify_funscript_stanza(
             ph_actions, start_ms, end_ms, chapter_ref=chapter_ref,
         )
-        out.append(Phrase(
+        out.append(Stanza(
             chapter_idx=ch_idx,
             at_ms=int(start_ms),
             end_ms=int(end_ms),
@@ -496,14 +496,14 @@ class _ChapterFunscriptStats:
         )
 
 
-def _classify_funscript_phrase(
+def _classify_funscript_stanza(
     ph_actions: list[dict],
     start_ms: int,
     end_ms: int,
     *,
     chapter_ref: _ChapterFunscriptStats | None,
 ) -> str:
-    """Pick a mode for one phrase's worth of funscript actions."""
+    """Pick a mode for one stanza's worth of funscript actions."""
     if len(ph_actions) < 2:
         return "break"
 
@@ -543,26 +543,26 @@ def _classify_funscript_phrase(
     return "steady"
 
 
-def _segment_actions_into_phrases(
+def _segment_actions_into_stanzas(
     actions: list[dict],
     *,
-    actions_per_phrase: int = _DEFAULT_FUNSCRIPT_PHRASE_ACTIONS,
+    actions_per_stanza: int = _DEFAULT_FUNSCRIPT_STANZA_ACTIONS,
 ) -> list[tuple[int, int]]:
-    """Group sorted actions into ``actions_per_phrase``-sized phrases.
+    """Group sorted actions into ``actions_per_stanza``-sized stanzas.
 
     Returns ``[(start_ms, end_ms), ...]`` covering every action. The last
-    phrase may be smaller than ``actions_per_phrase`` and runs to the
+    stanza may be smaller than ``actions_per_stanza`` and runs to the
     final action's timestamp.
     """
     if not actions:
         return []
     out: list[tuple[int, int]] = []
     n = len(actions)
-    for i in range(0, n, actions_per_phrase):
-        chunk = actions[i:i + actions_per_phrase]
+    for i in range(0, n, actions_per_stanza):
+        chunk = actions[i:i + actions_per_stanza]
         start_ms = chunk[0]["at"]
-        # End-of-phrase = start of next phrase, or last-action timestamp + 1.
-        end_idx = i + actions_per_phrase
+        # End-of-stanza = start of next stanza, or last-action timestamp + 1.
+        end_idx = i + actions_per_stanza
         if end_idx < n:
             end_ms = actions[end_idx]["at"]
         else:
@@ -573,7 +573,7 @@ def _segment_actions_into_phrases(
 
 # ---------------------------------------------------------------------------
 # Internal helper (mirrors structural._chapter_index_at to avoid the
-# structural→phrases import that would create a cycle)
+# structural→stanzas import that would create a cycle)
 # ---------------------------------------------------------------------------
 
 def _chapter_index_at(time_ms: int, chapters: list) -> int:

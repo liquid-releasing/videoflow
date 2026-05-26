@@ -133,38 +133,38 @@ class TestAnalyzeBeats(unittest.TestCase):
         self.assertEqual(result.downbeats, result.beats[::4])
 
     # ------------------------------------------------------------------
-    # Phrases — every 16 beats
+    # Stanzas — every 16 beats
     # ------------------------------------------------------------------
 
-    def test_phrase_count_32_beats(self):
-        """32 beats → 2 phrases of 16 beats each."""
+    def test_stanza_count_32_beats(self):
+        """32 beats → 2 stanzas of 16 beats each."""
         mock_lib = _make_librosa_mock(beat_count=32)
         with patch("videoflow.audio._librosa", mock_lib), \
              patch("videoflow.audio._np", __import__("numpy")), \
              patch.object(Path, "exists", return_value=True):
             from videoflow.audio import analyze_beats
             result = analyze_beats("track.mp3")
-        self.assertEqual(len(result.phrases), 2)
+        self.assertEqual(len(result.stanzas), 2)
 
-    def test_phrases_are_tuples(self):
+    def test_stanzas_are_tuples(self):
         mock_lib = _make_librosa_mock(beat_count=16)
         with patch("videoflow.audio._librosa", mock_lib), \
              patch("videoflow.audio._np", __import__("numpy")), \
              patch.object(Path, "exists", return_value=True):
             from videoflow.audio import analyze_beats
             result = analyze_beats("track.mp3")
-        for phrase in result.phrases:
-            self.assertIsInstance(phrase, tuple)
-            self.assertEqual(len(phrase), 2)
+        for stanza in result.stanzas:
+            self.assertIsInstance(stanza, tuple)
+            self.assertEqual(len(stanza), 2)
 
-    def test_phrase_start_lte_end(self):
+    def test_stanza_start_lte_end(self):
         mock_lib = _make_librosa_mock(beat_count=20)
         with patch("videoflow.audio._librosa", mock_lib), \
              patch("videoflow.audio._np", __import__("numpy")), \
              patch.object(Path, "exists", return_value=True):
             from videoflow.audio import analyze_beats
             result = analyze_beats("track.mp3")
-        for start, end in result.phrases:
+        for start, end in result.stanzas:
             self.assertLessEqual(start, end)
 
     # ------------------------------------------------------------------
@@ -224,7 +224,7 @@ class TestAnalyzeBeats(unittest.TestCase):
         from videoflow.audio import AudioBeatMap
         bm = AudioBeatMap(
             bpm=120.0, beats=[0, 500, 1000, 1500, 2000],
-            downbeats=[0], phrases=[(0, 2000)], energy=[1.0] * 5, duration_ms=2000,
+            downbeats=[0], stanzas=[(0, 2000)], energy=[1.0] * 5, duration_ms=2000,
         )
         self.assertEqual(bm.beats_in_range(0, 1000), [0, 500])
 
@@ -232,7 +232,7 @@ class TestAnalyzeBeats(unittest.TestCase):
         from videoflow.audio import AudioBeatMap
         bm = AudioBeatMap(
             bpm=120.0, beats=[0, 500, 1000],
-            downbeats=[0], phrases=[(0, 1000)], energy=[1.0] * 3, duration_ms=1000,
+            downbeats=[0], stanzas=[(0, 1000)], energy=[1.0] * 3, duration_ms=1000,
         )
         self.assertEqual(bm.beats_in_range(100, 400), [])
 
@@ -244,7 +244,7 @@ class TestAnalyzeBeats(unittest.TestCase):
         from videoflow.audio import AudioBeatMap
         bm = AudioBeatMap(
             bpm=120.0, beats=[0, 500, 1000],
-            downbeats=[0], phrases=[(0, 1000)], energy=[1.0] * 3, duration_ms=1000,
+            downbeats=[0], stanzas=[(0, 1000)], energy=[1.0] * 3, duration_ms=1000,
         )
         self.assertEqual(bm.nearest_beat(500), 500)
 
@@ -252,7 +252,7 @@ class TestAnalyzeBeats(unittest.TestCase):
         from videoflow.audio import AudioBeatMap
         bm = AudioBeatMap(
             bpm=120.0, beats=[0, 500, 1000],
-            downbeats=[0], phrases=[(0, 1000)], energy=[1.0] * 3, duration_ms=1000,
+            downbeats=[0], stanzas=[(0, 1000)], energy=[1.0] * 3, duration_ms=1000,
         )
         self.assertEqual(bm.nearest_beat(300), 500)
 
@@ -260,7 +260,7 @@ class TestAnalyzeBeats(unittest.TestCase):
         from videoflow.audio import AudioBeatMap
         bm = AudioBeatMap(
             bpm=120.0, beats=[0, 500, 1000],
-            downbeats=[0], phrases=[(0, 1000)], energy=[1.0] * 3, duration_ms=1000,
+            downbeats=[0], stanzas=[(0, 1000)], energy=[1.0] * 3, duration_ms=1000,
         )
         self.assertEqual(bm.nearest_beat(900, direction="before"), 500)
 
@@ -268,7 +268,7 @@ class TestAnalyzeBeats(unittest.TestCase):
         from videoflow.audio import AudioBeatMap
         bm = AudioBeatMap(
             bpm=120.0, beats=[0, 500, 1000],
-            downbeats=[0], phrases=[(0, 1000)], energy=[1.0] * 3, duration_ms=1000,
+            downbeats=[0], stanzas=[(0, 1000)], energy=[1.0] * 3, duration_ms=1000,
         )
         self.assertEqual(bm.nearest_beat(600, direction="after"), 1000)
 
@@ -276,7 +276,7 @@ class TestAnalyzeBeats(unittest.TestCase):
         from videoflow.audio import AudioBeatMap
         bm = AudioBeatMap(
             bpm=120.0, beats=[0, 500],
-            downbeats=[0], phrases=[(0, 500)], energy=[1.0] * 2, duration_ms=500,
+            downbeats=[0], stanzas=[(0, 500)], energy=[1.0] * 2, duration_ms=500,
         )
         with self.assertRaises(ValueError):
             bm.nearest_beat(250, direction="sideways")
@@ -284,7 +284,7 @@ class TestAnalyzeBeats(unittest.TestCase):
     def test_nearest_beat_no_beats(self):
         from videoflow.audio import AudioBeatMap, BeatError
         bm = AudioBeatMap(
-            bpm=120.0, beats=[], downbeats=[], phrases=[], energy=[], duration_ms=0,
+            bpm=120.0, beats=[], downbeats=[], stanzas=[], energy=[], duration_ms=0,
         )
         with self.assertRaises(BeatError):
             bm.nearest_beat(500)
@@ -588,7 +588,7 @@ class TestAnalyzeBeatsWithChapters(unittest.TestCase):
         return path
 
     def test_chapters_path_returns_stitched_timeline(self):
-        """beats / phrases / energy concat in chapter order; timestamps ascending."""
+        """beats / stanzas / energy concat in chapter order; timestamps ascending."""
         from tempfile import TemporaryDirectory
         from videoflow.audio import analyze_beats
         from videoflow.chapters import Chapter

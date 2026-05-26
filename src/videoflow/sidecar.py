@@ -1,7 +1,7 @@
 """Sidecar IO for the audio-structure database (``<stem>.chapters.json``).
 
 The sidecar is the structural database for one media file: chapters,
-phrases, energy analysis, per-chapter tone, and any other carry-forward
+stanzas, energy analysis, per-chapter tone, and any other carry-forward
 analysis the toolchain wants to share. Multiple writers (forgegen,
 FunscriptForge, forgeassembler) cooperate through field-level merge
 semantics rather than a lock.
@@ -35,7 +35,7 @@ from typing import Any, Literal
 
 from videoflow.chapters import Chapter
 
-CURRENT_SCHEMA_VERSION = "2.0"
+CURRENT_SCHEMA_VERSION = "3.0"
 SCHEMA_NAME = "audio-structure"
 
 WriteMode = Literal["analyze", "edit"]
@@ -46,10 +46,10 @@ _CHAPTER_AUTHORED: tuple[str, ...] = ("name", "intent", "include")
 _CHAPTER_MIXED: tuple[str, ...] = ("tone", "shape")
 _CHAPTER_STRUCTURAL: tuple[str, ...] = ("at_ms", "end_ms")
 
-_PHRASE_ANALYTICAL: tuple[str, ...] = ("mode", "confidence", "evidence")
-_PHRASE_AUTHORED: tuple[str, ...] = ("intent",)
-_PHRASE_MIXED: tuple[str, ...] = ("tone",)
-_PHRASE_STRUCTURAL: tuple[str, ...] = ("chapter_idx", "at_ms", "end_ms")
+_STANZA_ANALYTICAL: tuple[str, ...] = ("mode", "confidence", "evidence")
+_STANZA_AUTHORED: tuple[str, ...] = ("intent",)
+_STANZA_MIXED: tuple[str, ...] = ("tone",)
+_STANZA_STRUCTURAL: tuple[str, ...] = ("chapter_idx", "at_ms", "end_ms")
 
 # Texture vocabulary. New names (driving / calm / varied) replaced
 # music / ambient / mixed on 2026-05-24 — see
@@ -65,7 +65,7 @@ _VALID_CONTENT_TYPES = frozenset({
 # will add 'sing' / 'react' via pitch-stability + segment-length heuristics
 # on the VAD output.
 _VALID_VOICE_LABELS = frozenset({"", "talk"})
-_VALID_PHRASE_MODES = frozenset({"", "tease", "steady", "edging", "break", "fast", "slow"})
+_VALID_STANZA_MODES = frozenset({"", "tease", "steady", "edging", "break", "fast", "slow"})
 
 # FunscriptForge mood vocabulary (closed enum, cross-product semantic).
 # See videoflow/docs/architecture/audio-structure-primitive.md#tone-vocabulary
@@ -74,7 +74,7 @@ _VALID_TONE_LABELS = frozenset({
     "", "tender", "build", "tease", "edge", "climax", "dominant",
 })
 
-# forgegen curve-direction primitive (closed enum). Drives the per-phrase
+# forgegen curve-direction primitive (closed enum). Drives the per-stanza
 # center trajectory used by beats_to_curve. Distinct from `tone` above.
 # Sidecar field name is `shape`; forgegen's UI labels this control "Tone".
 _VALID_SHAPES = frozenset({"", "flat", "rise", "fall", "auto"})
@@ -92,7 +92,7 @@ def forge_dir(media_path: str | Path) -> Path:
     """Return the per-project hidden cache directory for *media_path*.
 
     All videoflow sidecars (chapters, peaks, spectrogram, beats,
-    phrases) and the funscriptforge chapter-clip MP4 cache live inside
+    stanzas) and the funscriptforge chapter-clip MP4 cache live inside
     this folder rather than scattering next to the source file:
 
         <dir>/.<stem>.forge/
@@ -128,14 +128,14 @@ def read_sidecar(media_path: str | Path) -> dict[str, Any] | None:
     """Read ``<stem>.chapters.json`` next to *media_path*.
 
     Returns the parsed JSON document with v1 sidecars normalised to v2
-    shape (empty ``phrases`` / ``provenance`` lists, no ``energy``).
+    shape (empty ``stanzas`` / ``provenance`` lists, no ``energy``).
     Returns ``None`` when no sidecar exists. Unknown fields round-trip
     verbatim — readers must not strip them on writeback.
 
     Raises:
         SidecarError: If the file is unreadable JSON, the top-level
             shape is not an object or list, or a required field is
-            missing on a chapter / phrase record.
+            missing on a chapter / stanza record.
     """
     path = sidecar_path_for(media_path)
     if not path.exists():
@@ -206,7 +206,7 @@ def write_sidecar(
         media_path: Path to the source media. The sidecar is written
             next to it as ``<stem>.chapters.json``.
         payload: The data to merge in. Recognised top-level fields:
-            ``chapters``, ``phrases``, ``energy``, plus any unknown
+            ``chapters``, ``stanzas``, ``energy``, plus any unknown
             top-level fields the caller wants persisted.
         writer: Module / app id (e.g. ``"videoflow.structural"``,
             ``"FunscriptForge"``). Recorded in provenance.
@@ -252,7 +252,7 @@ def _normalise(doc: dict[str, Any], *, source: str) -> dict[str, Any]:
 
     v1 sidecars with top-level ``auto_generated: false`` (the legacy
     "user-edited file" marker) are migrated forward by setting
-    per-record ``auto_generated: false`` on every chapter and phrase
+    per-record ``auto_generated: false`` on every chapter and stanza
     that doesn't already carry its own value. This preserves the v1
     user-edit-protection semantics inside the new per-record latch
     model the merger consults.
@@ -273,14 +273,14 @@ def _normalise(doc: dict[str, Any], *, source: str) -> dict[str, Any]:
             ch["auto_generated"] = False
     out["chapters"] = chapters
 
-    phrases = doc.get("phrases", [])
-    if not isinstance(phrases, list):
-        raise SidecarError(f"{source}: 'phrases' must be a list")
-    for i, ph in enumerate(phrases):
-        _validate_phrase(ph, source=source, idx=i)
+    stanzas = doc.get("stanzas", [])
+    if not isinstance(stanzas, list):
+        raise SidecarError(f"{source}: 'stanzas' must be a list")
+    for i, ph in enumerate(stanzas):
+        _validate_stanza(ph, source=source, idx=i)
         if legacy_user_edited and isinstance(ph, dict) and "auto_generated" not in ph:
             ph["auto_generated"] = False
-    out["phrases"] = phrases
+    out["stanzas"] = stanzas
 
     energy = doc.get("energy")
     if energy is not None:
@@ -334,27 +334,27 @@ def _validate_chapter(ch: Any, *, source: str, idx: int) -> None:
         )
 
 
-def _validate_phrase(ph: Any, *, source: str, idx: int) -> None:
+def _validate_stanza(ph: Any, *, source: str, idx: int) -> None:
     if not isinstance(ph, dict):
         raise SidecarError(
-            f"{source}: phrases[{idx}] must be an object, got "
+            f"{source}: stanzas[{idx}] must be an object, got "
             f"{type(ph).__name__}"
         )
     for required in ("chapter_idx", "at_ms", "end_ms"):
         if required not in ph:
             raise SidecarError(
-                f"{source}: phrases[{idx}] missing '{required}'"
+                f"{source}: stanzas[{idx}] missing '{required}'"
             )
     mode = ph.get("mode")
-    if mode is not None and mode not in _VALID_PHRASE_MODES:
+    if mode is not None and mode not in _VALID_STANZA_MODES:
         raise SidecarError(
-            f"{source}: phrases[{idx}].mode must be one of "
-            f"{sorted(_VALID_PHRASE_MODES)}, got {mode!r}"
+            f"{source}: stanzas[{idx}].mode must be one of "
+            f"{sorted(_VALID_STANZA_MODES)}, got {mode!r}"
         )
     tone = ph.get("tone")
     if tone is not None and tone not in _VALID_TONE_LABELS:
         raise SidecarError(
-            f"{source}: phrases[{idx}].tone must be one of "
+            f"{source}: stanzas[{idx}].tone must be one of "
             f"{sorted(_VALID_TONE_LABELS)}, got {tone!r}"
         )
 
@@ -383,7 +383,7 @@ def _fresh_payload(
 
 
 _KNOWN_TOP_LEVEL = frozenset({
-    "schema", "version", "chapters", "phrases", "energy",
+    "schema", "version", "chapters", "stanzas", "energy",
     "provenance", "auto_generated", "generated_by",
 })
 
@@ -426,16 +426,16 @@ def _merge_payload(
             mode=mode,
         )
 
-    # Phrases — same rules, composite key.
-    if incoming.get("phrases"):
-        merged["phrases"] = _merge_record_list(
-            existing.get("phrases") or [],
-            incoming["phrases"],
-            analytical=_PHRASE_ANALYTICAL,
-            authored=_PHRASE_AUTHORED,
-            mixed=_PHRASE_MIXED,
-            structural=_PHRASE_STRUCTURAL,
-            key_fn=_phrase_key,
+    # Stanzas — same rules, composite key.
+    if incoming.get("stanzas"):
+        merged["stanzas"] = _merge_record_list(
+            existing.get("stanzas") or [],
+            incoming["stanzas"],
+            analytical=_STANZA_ANALYTICAL,
+            authored=_STANZA_AUTHORED,
+            mixed=_STANZA_MIXED,
+            structural=_STANZA_STRUCTURAL,
+            key_fn=_stanza_key,
             mode=mode,
         )
 
@@ -460,7 +460,7 @@ def _chapter_key(rec: dict) -> tuple:
     return (rec.get("at_ms"),)
 
 
-def _phrase_key(rec: dict) -> tuple:
+def _stanza_key(rec: dict) -> tuple:
     return (rec.get("chapter_idx"), rec.get("at_ms"))
 
 
@@ -573,7 +573,7 @@ def _carry_unknown(out: dict, new: dict, *, known: set[str]) -> None:
 def _fields_touched(payload: dict[str, Any]) -> list[str]:
     """Best-effort summary of which top-level blocks the writer touched."""
     fields: list[str] = []
-    for k in ("chapters", "phrases", "energy"):
+    for k in ("chapters", "stanzas", "energy"):
         v = payload.get(k)
         if v:
             fields.append(k)

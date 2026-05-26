@@ -313,8 +313,8 @@ class TestAutoChapterAudioSidecars(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Energy payload builder (phrase classification + chapter-index lookup
-# moved to videoflow.phrases — see tests/test_phrases.py)
+# Energy payload builder (stanza classification + chapter-index lookup
+# moved to videoflow.stanzas — see tests/test_stanzas.py)
 # ---------------------------------------------------------------------------
 
 class TestBuildEnergy(unittest.TestCase):
@@ -398,13 +398,13 @@ class TestPercentile(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Integration — auto_chapter writes phrases + energy into the sidecar
+# Integration — auto_chapter writes stanzas + energy into the sidecar
 # ---------------------------------------------------------------------------
 
 class TestAutoChapterEmitsExpandedSidecar(unittest.TestCase):
 
-    def test_short_file_sidecar_carries_phrases_and_energy_blocks(self):
-        """auto_chapter on a real audio file lands chapters + phrases + energy.
+    def test_short_file_sidecar_carries_stanzas_and_energy_blocks(self):
+        """auto_chapter on a real audio file lands chapters + stanzas + energy.
 
         Uses a click track so analyze_beats / classify_modes have real
         rhythmic content to work on (unlike a uniform sine wave).
@@ -422,14 +422,14 @@ class TestAutoChapterEmitsExpandedSidecar(unittest.TestCase):
             self.assertTrue(sidecar.exists())
             doc = json.loads(sidecar.read_text(encoding="utf-8"))
 
-            # Schema upgraded to v2 by the new write path
-            self.assertEqual(doc["version"], "2.0")
+            # Schema bumped to v3 with the phrases → stanzas rename
+            self.assertEqual(doc["version"], "3.0")
             self.assertEqual(doc["schema"], "audio-structure")
             self.assertGreaterEqual(len(doc["chapters"]), 1)
 
-            # phrases is always present (may be empty if classify_modes
+            # stanzas is always present (may be empty if classify_modes
             # found nothing), energy is present when beats were analyzed.
-            self.assertIn("phrases", doc)
+            self.assertIn("stanzas", doc)
             self.assertIn("energy", doc)
             self.assertIn("percentiles", doc["energy"])
             self.assertIn("beat_map", doc["energy"])

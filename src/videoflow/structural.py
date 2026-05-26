@@ -47,7 +47,7 @@ from videoflow.chapter_clips import (
     extract_chapter_clip as _extract_clip,
 )
 from videoflow.chapters import Chapter
-from videoflow.phrases import Phrase, classify_phrases as _classify_phrases
+from videoflow.stanzas import Stanza, classify_stanzas as _classify_stanzas
 from videoflow.progress import OnProgress, ProgressReporter
 from videoflow.sidecar import write_sidecar as _write_sidecar
 
@@ -338,7 +338,7 @@ def auto_chapter(
 
     chapters: list[Chapter] = []
     beat_map = None
-    phrases: list[Phrase] = []
+    stanzas: list[Stanza] = []
 
     with reporter.stage("structural.auto_chapter"):
         with reporter.stage("extract"):
@@ -377,7 +377,7 @@ def auto_chapter(
             # soon as detection finishes, without waiting for beats /
             # classify / audio sidecars. The editor's chapter strip
             # listens for this event and populates immediately; the
-            # later `sidecar` stage field-merges phrases + energy into
+            # later `sidecar` stage field-merges stanzas + energy into
             # the same file. Trades a tiny extra write for a much
             # tighter "I clicked Analyze, when do I see chapters?" loop.
             if write_sidecar:
@@ -420,16 +420,16 @@ def auto_chapter(
                 reporter.complete(
                     summary=(
                         f"{len(beat_map.beats)} beats, "
-                        f"{len(beat_map.phrases)} phrases @ "
+                        f"{len(beat_map.stanzas)} stanzas @ "
                         f"{beat_map.bpm:.1f} BPM"
                     )
                 )
 
             with reporter.stage("classify"):
-                _progress("Classifying phrases…")
-                phrases = _classify_phrases(beat_map, chapters=chapters)
+                _progress("Classifying stanzas…")
+                stanzas = _classify_stanzas(beat_map, chapters=chapters)
                 reporter.complete(
-                    summary=f"{len(phrases)} phrases classified",
+                    summary=f"{len(stanzas)} stanzas classified",
                 )
 
             # MediaViewer sidecars — peaks + spectrogram, built from the
@@ -490,16 +490,16 @@ def auto_chapter(
                             ),
                         )
 
-                # Final sidecar merge — adds `phrases` + `energy` to the
+                # Final sidecar merge — adds `stanzas` + `energy` to the
                 # chapters-only file already on disk (from the earlier
                 # `chapters_sidecar` stage right after `detect`). The
                 # `write_sidecar` helper does a field-level merge so the
-                # existing `chapters` entries stay put; phrases/energy
+                # existing `chapters` entries stay put; stanzas/energy
                 # become available to the editor as a follow-up paint.
                 #
                 # Order: chapters_sidecar (after detect) → beats →
                 # classify → audio_peaks → spectrogram → audio_beats →
-                # sidecar (this stage, merges phrases + energy) →
+                # sidecar (this stage, merges stanzas + energy) →
                 # chapter_clips. The chapter strip lights up after
                 # `chapters_sidecar`; chapter clips can still take
                 # several minutes on 4K sources without blocking the UI.
@@ -509,7 +509,7 @@ def auto_chapter(
                     _progress("Writing sidecar…")
                     payload: dict = {
                         "chapters": [c.to_dict() for c in chapters],
-                        "phrases": [p.to_dict() for p in phrases],
+                        "stanzas": [p.to_dict() for p in stanzas],
                         "generated_by": {
                             "tool": "videoflow.structural",
                             "tool_version": _videoflow_version(),
@@ -527,7 +527,7 @@ def auto_chapter(
                     reporter.complete(
                         summary=(
                             f"sidecar merged: {len(chapters)} chapters, "
-                            f"{len(payload['phrases'])} phrases"
+                            f"{len(payload['stanzas'])} stanzas"
                         ),
                     )
 
@@ -1073,7 +1073,7 @@ def _classify_content(y, sr: int) -> tuple[str, str, float, list[str]]:
 
 # ---------------------------------------------------------------------------
 # Energy payload builder (consumed by write_sidecar in auto_chapter).
-# Phrase building lives in videoflow.phrases as part of classify_phrases.
+# Stanza building lives in videoflow.stanzas as part of classify_stanzas.
 # ---------------------------------------------------------------------------
 
 def _build_energy(beat_map, chapters: list[Chapter]) -> dict:

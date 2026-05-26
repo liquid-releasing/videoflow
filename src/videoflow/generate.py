@@ -3,7 +3,7 @@
 Pipeline:
     AudioBeatMap
         → beats_to_curve()    — beat-locked alternating stroke signal
-        → classify_modes()    — phrase-level mode labels (slow/fast/tease/edging/break)
+        → classify_modes()    — stanza-level mode labels (slow/fast/tease/edging/break)
         → shape_curve()       — mode-aware amplitude adjustment
         → export_funscript()  — validated .funscript JSON
 
@@ -73,7 +73,7 @@ def _resolve_density(value) -> int:
 
 #: Amplitude scale factors per mode.
 #: high_scale: fraction of the raw (high - low) amplitude to keep.
-#: edging is handled separately (builds within the phrase).
+#: edging is handled separately (builds within the stanza).
 _MODE_HIGH_SCALE: dict[str, float] = {
     "break":  0.12,  # near-still — tiny movement, device stays alive
     "tease":  0.38,  # subtle — noticeable but restrained
@@ -98,7 +98,7 @@ def beats_to_curve(
     min_stroke: int = 20,
     center: int | None = None,
     center_trajectory: tuple[int, int] | None = None,
-    tone_per_phrase: list[tuple[int, int, int, int]] | None = None,
+    tone_per_stanza: list[tuple[int, int, int, int]] | None = None,
     energy_normalize: bool = False,
     stroke_density: object = "half",
 ) -> list[tuple[int, int]]:
@@ -179,17 +179,17 @@ def beats_to_curve(
     track_dur = max(track_end - track_start, 1)
 
     def center_at(t: int) -> int:
-        # Per-phrase tone takes priority — picks the segment containing t
+        # Per-stanza tone takes priority — picks the segment containing t
         # and interpolates within it. Falls back to track-wide trajectory,
         # then to constant center.
-        if tone_per_phrase:
-            for ps, pe, sc, ec in tone_per_phrase:
+        if tone_per_stanza:
+            for ps, pe, sc, ec in tone_per_stanza:
                 if ps <= t < pe:
                     span = max(1, pe - ps)
                     progress = max(0.0, min(1.0, (t - ps) / span))
                     return int(round(sc + (ec - sc) * progress))
             # past end of last segment — clamp to last segment's end
-            ps, pe, sc, ec = tone_per_phrase[-1]
+            ps, pe, sc, ec = tone_per_stanza[-1]
             return ec
         if center_trajectory is not None:
             start_c, end_c = center_trajectory
@@ -203,7 +203,7 @@ def beats_to_curve(
     use_centered = (
         center is not None
         or center_trajectory is not None
-        or tone_per_phrase is not None
+        or tone_per_stanza is not None
     )
     if use_centered:
         max_half = (high - low) / 2
@@ -262,7 +262,7 @@ def beats_to_curve(
 
 
 # ---------------------------------------------------------------------------
-# Auto-tone — per-phrase center trajectory from energy slope
+# Auto-tone — per-stanza center trajectory from energy slope
 # ---------------------------------------------------------------------------
 
 def compute_auto_tone(
@@ -271,33 +271,33 @@ def compute_auto_tone(
     baseline: int = 50,
     swing: int = 20,
 ) -> list[tuple[int, int, int, int]]:
-    """Per-phrase center trajectory derived from each phrase's energy slope.
+    """Per-stanza center trajectory derived from each stanza's energy slope.
 
-    For each phrase, fit a line to its beat-level energies. A rising slope
-    means the phrase is building (more intensity / density / drone weight
-    over the phrase) — its center starts lower and ends higher. A falling
-    slope means the phrase relaxes — center starts higher and ends lower.
+    For each stanza, fit a line to its beat-level energies. A rising slope
+    means the stanza is building (more intensity / density / drone weight
+    over the stanza) — its center starts lower and ends higher. A falling
+    slope means the stanza relaxes — center starts higher and ends lower.
     A flat slope keeps center near baseline.
 
     Works on **musical movement** broadly, not just melody — drones and
-    rhythmic-only phrases produce a non-zero slope too because their energy
+    rhythmic-only stanzas produce a non-zero slope too because their energy
     builds and decays through layered onsets, even with static pitch.
 
     Args:
         beat_map: Result of :func:`~videoflow.audio.analyze_beats`.
         baseline: Center value the trajectory swings around (0–100).
             Default 50 (mid-stroke).
-        swing: Maximum total swing of one phrase, in position units. With
-            swing=20 a fully-rising phrase goes from baseline-10 to
+        swing: Maximum total swing of one stanza, in position units. With
+            swing=20 a fully-rising stanza goes from baseline-10 to
             baseline+10. Default 20.
 
     Returns:
         List of ``(start_ms, end_ms, start_center, end_center)`` tuples,
-        one per phrase. Pass directly to ``beats_to_curve(tone_per_phrase=…)``.
+        one per stanza. Pass directly to ``beats_to_curve(tone_per_stanza=…)``.
     """
     segments: list[tuple[int, int, int, int]] = []
     energies = list(beat_map.energy)
-    for start_ms, end_ms in beat_map.phrases:
+    for start_ms, end_ms in beat_map.stanzas:
         idx = [
             i for i, b in enumerate(beat_map.beats)
             if start_ms <= b < end_ms
@@ -306,15 +306,15 @@ def compute_auto_tone(
             segments.append((start_ms, end_ms, baseline, baseline))
             continue
 
-        phrase_e = [energies[i] for i in idx]
-        n = len(phrase_e)
+        stanza_e = [energies[i] for i in idx]
+        n = len(stanza_e)
         x_mean = (n - 1) / 2
-        y_mean = sum(phrase_e) / n
-        num = sum((i - x_mean) * (e - y_mean) for i, e in enumerate(phrase_e))
+        y_mean = sum(stanza_e) / n
+        num = sum((i - x_mean) * (e - y_mean) for i, e in enumerate(stanza_e))
         den = sum((i - x_mean) ** 2 for i in range(n))
         slope = num / den if den > 0 else 0.0
 
-        # Normalise: a slope that climbs 1.0 energy unit across the phrase
+        # Normalise: a slope that climbs 1.0 energy unit across the stanza
         # = full swing in one direction. Clip to ±1 for stability.
         rise = max(-1.0, min(1.0, slope * (n - 1)))
         delta = int(round(swing * rise / 2))
@@ -323,11 +323,11 @@ def compute_auto_tone(
 
 
 # ---------------------------------------------------------------------------
-# Step 2 — Mode classification (lifted to videoflow.phrases in 0.0.5;
+# Step 2 — Mode classification (lifted to videoflow.stanzas in 0.0.5;
 # re-exported here for back-compat with v0.0.4 callers)
 # ---------------------------------------------------------------------------
 
-from videoflow.phrases import classify_modes  # noqa: E402,F401
+from videoflow.stanzas import classify_modes  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------
@@ -341,11 +341,11 @@ def shape_curve(
     low: int = 10,
     center: int | None = None,
     center_trajectory: tuple[int, int] | None = None,
-    tone_per_phrase: list[tuple[int, int, int, int]] | None = None,
+    tone_per_stanza: list[tuple[int, int, int, int]] | None = None,
 ) -> list[tuple[int, int]]:
     """Apply mode-aware amplitude shaping to a raw motion curve.
 
-    Each point in *curve* is adjusted based on the mode of the phrase it
+    Each point in *curve* is adjusted based on the mode of the stanza it
     falls in:
 
     - **break** — amplitude compressed to ~12 % (device barely moves)
@@ -354,7 +354,7 @@ def shape_curve(
     - **steady** — normal amplitude (~78 %)
     - **fast** — slightly compressed (~70 %)
     - **edging** — amplitude builds linearly from 50 % → 100 % over
-      the phrase, creating a rising tension arc
+      the stanza, creating a rising tension arc
 
     Two compression models match the two :func:`beats_to_curve` modes:
 
@@ -393,13 +393,13 @@ def shape_curve(
     track_dur = max(track_end - track_start, 1)
 
     def center_at(t: int) -> int | None:
-        if tone_per_phrase:
-            for ps, pe, sc, ec in tone_per_phrase:
+        if tone_per_stanza:
+            for ps, pe, sc, ec in tone_per_stanza:
                 if ps <= t < pe:
                     span = max(1, pe - ps)
                     progress = max(0.0, min(1.0, (t - ps) / span))
                     return int(round(sc + (ec - sc) * progress))
-            return tone_per_phrase[-1][3]  # past end → last segment's end
+            return tone_per_stanza[-1][3]  # past end → last segment's end
         if center_trajectory is not None:
             start_c, end_c = center_trajectory
             progress = (t - track_start) / track_dur
@@ -415,7 +415,7 @@ def shape_curve(
         if mode == "edging":
             sec_dur = max(1, sec_end - sec_start)
             progress = min(1.0, (t - sec_start) / sec_dur)
-            scale = 0.50 + 0.50 * progress  # 50% → 100% over phrase
+            scale = 0.50 + 0.50 * progress  # 50% → 100% over stanza
         else:
             scale = _MODE_HIGH_SCALE.get(mode, _MODE_HIGH_SCALE["steady"])
 
@@ -534,7 +534,7 @@ def generate_from_beats(
     high: int = 90,
     center: int | None = None,
     center_trajectory: tuple[int, int] | None = None,
-    tone_per_phrase: list[tuple[int, int, int, int]] | None = None,
+    tone_per_stanza: list[tuple[int, int, int, int]] | None = None,
     energy_normalize: bool = False,
     stroke_density: object = "half",
     title: str = "",
@@ -586,14 +586,14 @@ def generate_from_beats(
                 beat_map,
                 low=low, high=high, center=center,
                 center_trajectory=center_trajectory,
-                tone_per_phrase=tone_per_phrase,
+                tone_per_stanza=tone_per_stanza,
                 energy_normalize=energy_normalize,
                 stroke_density=stroke_density,
             )
             reporter.complete(summary=f"{len(curve)} curve points")
 
         with reporter.stage("classify"):
-            _progress("Classifying phrase modes…")
+            _progress("Classifying stanza modes…")
             modes = classify_modes(beat_map)
             reporter.complete(summary=f"{len(modes)} mode segments")
 
@@ -603,7 +603,7 @@ def generate_from_beats(
                 curve, modes,
                 low=low, center=center,
                 center_trajectory=center_trajectory,
-                tone_per_phrase=tone_per_phrase,
+                tone_per_stanza=tone_per_stanza,
             )
             reporter.complete(summary=f"{len(shaped)} actions shaped")
 
@@ -626,8 +626,8 @@ def _slice_beat_map(bm: AudioBeatMap, start_ms: int, end_ms: int) -> AudioBeatMa
     """Return a new :class:`AudioBeatMap` restricted to ``[start_ms, end_ms)``.
 
     Beats and energy keep their absolute timestamps so generated actions
-    line up with the source media when concatenated. Phrases that overlap
-    the window are kept intact (a phrase straddling a chapter boundary is
+    line up with the source media when concatenated. Stanzas that overlap
+    the window are kept intact (a stanza straddling a chapter boundary is
     classified by whichever chapter contains its centre — that's a
     follow-up; for now both chapters see it)."""
     beat_indices = [i for i, b in enumerate(bm.beats) if start_ms <= b < end_ms]
@@ -636,12 +636,12 @@ def _slice_beat_map(bm: AudioBeatMap, start_ms: int, end_ms: int) -> AudioBeatMa
         [bm.energy[i] for i in beat_indices] if bm.energy else []
     )
     sliced_downbeats = [d for d in bm.downbeats if start_ms <= d < end_ms]
-    sliced_phrases = [(s, e) for (s, e) in bm.phrases if e > start_ms and s < end_ms]
+    sliced_stanzas = [(s, e) for (s, e) in bm.stanzas if e > start_ms and s < end_ms]
     return AudioBeatMap(
         bpm=bm.bpm,
         beats=sliced_beats,
         downbeats=sliced_downbeats,
-        phrases=sliced_phrases,
+        stanzas=sliced_stanzas,
         energy=sliced_energy,
         duration_ms=max(0, end_ms - start_ms),
     )
@@ -706,14 +706,14 @@ def generate_from_beats_per_chapter(
 
         # Resolve tone for this chapter's recipe.
         traj = None
-        tone_per_phrase = None
+        tone_per_stanza = None
         tone = recipe.get("tone", "flat")
         if tone == "rise":
             traj = (30, 70)
         elif tone == "fall":
             traj = (70, 30)
         elif tone == "auto":
-            tone_per_phrase = compute_auto_tone(sliced)
+            tone_per_stanza = compute_auto_tone(sliced)
 
         density = recipe.get("stroke_density", "half")
 
@@ -721,7 +721,7 @@ def generate_from_beats_per_chapter(
             sliced,
             low=low, high=high,
             center_trajectory=traj,
-            tone_per_phrase=tone_per_phrase,
+            tone_per_stanza=tone_per_stanza,
             stroke_density=density,
         )
         modes = classify_modes(sliced)
@@ -729,7 +729,7 @@ def generate_from_beats_per_chapter(
             curve, modes,
             low=low,
             center_trajectory=traj,
-            tone_per_phrase=tone_per_phrase,
+            tone_per_stanza=tone_per_stanza,
         )
         all_actions.extend(shaped)
 

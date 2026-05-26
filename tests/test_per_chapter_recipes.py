@@ -19,14 +19,14 @@ from videoflow.generate import (
 
 def _synth_beat_map(duration_ms: int = 60_000) -> AudioBeatMap:
     """60-second synthetic beat-map: beat every 500ms (120 BPM), downbeat
-    every 4 beats, four 15s phrases. Enough structure for the per-chapter
+    every 4 beats, four 15s stanzas. Enough structure for the per-chapter
     generator to produce real curves."""
     beats = list(range(0, duration_ms, 500))
     return AudioBeatMap(
         bpm=120.0,
         beats=beats,
         downbeats=list(range(0, duration_ms, 2000)),
-        phrases=[
+        stanzas=[
             (0, 15000),
             (15000, 30000),
             (30000, 45000),
@@ -69,10 +69,10 @@ class TestSliceBeatMap(unittest.TestCase):
         sliced = _slice_beat_map(self.bm, 0, 10_000)
         self.assertEqual(len(sliced.energy), len(sliced.beats))
 
-    def test_phrase_overlapping_window_is_kept(self):
-        # Phrase 0 spans 0..15000; window 10000..20000 partially overlaps.
+    def test_stanza_overlapping_window_is_kept(self):
+        # Stanza 0 spans 0..15000; window 10000..20000 partially overlaps.
         sliced = _slice_beat_map(self.bm, 10_000, 20_000)
-        self.assertIn((0, 15000), sliced.phrases)
+        self.assertIn((0, 15000), sliced.stanzas)
 
 
 class TestGenerateFromBeatsPerChapter(unittest.TestCase):

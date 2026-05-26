@@ -3,7 +3,7 @@
 Demonstrates:
   - analyze_beats() — one call returns the full AudioBeatMap
   - save() / load() — skip re-analysis on repeat runs
-  - Exploring bpm, beats, downbeats, phrases, energy
+  - Exploring bpm, beats, downbeats, stanzas, energy
   - nearest_beat() — snap a time to the nearest beat
   - beats_in_range() — find beats in a window
 
@@ -49,7 +49,7 @@ def main():
     print(f"Beat interval: {beat_map.beat_interval_ms:.0f}ms")
     print(f"Beats:         {len(beat_map.beats)}")
     print(f"Downbeats:     {len(beat_map.downbeats)}")
-    print(f"Phrases:       {len(beat_map.phrases)}")
+    print(f"Stanzas:       {len(beat_map.stanzas)}")
 
     # First 8 beats
     print(f"\nFirst 8 beat timestamps (ms):")
@@ -57,9 +57,9 @@ def main():
         marker = " ← downbeat" if b in beat_map.downbeats else ""
         print(f"  {i+1:>2}  {b:>7}ms{marker}")
 
-    # Phrases
-    print(f"\nPhrases (first 5):")
-    for i, (start, end) in enumerate(beat_map.phrases[:5]):
+    # Stanzas
+    print(f"\nStanzas (first 5):")
+    for i, (start, end) in enumerate(beat_map.stanzas[:5]):
         print(f"  {i+1:>2}  {start/1000:>6.2f}s → {end/1000:>6.2f}s")
 
     # High-energy beats

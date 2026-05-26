@@ -26,7 +26,7 @@ def _beat_map(
     bpm: float = 120.0,
     beats: list[int] | None = None,
     energy: list[float] | None = None,
-    phrases: list[tuple[int, int]] | None = None,
+    stanzas: list[tuple[int, int]] | None = None,
     duration_ms: int = 10_000,
 ) -> AudioBeatMap:
     """Build a minimal AudioBeatMap for testing."""
@@ -34,13 +34,13 @@ def _beat_map(
         beats = [0, 500, 1000, 1500, 2000, 2500, 3000, 3500]
     if energy is None:
         energy = [0.8] * len(beats)
-    if phrases is None:
-        phrases = [(0, duration_ms)]
+    if stanzas is None:
+        stanzas = [(0, duration_ms)]
     return AudioBeatMap(
         bpm=bpm,
         beats=beats,
         downbeats=beats[::4],
-        phrases=phrases,
+        stanzas=stanzas,
         energy=energy,
         duration_ms=duration_ms,
     )
@@ -109,23 +109,23 @@ class TestBeatsToCurve(unittest.TestCase):
 
 class TestClassifyModes(unittest.TestCase):
 
-    def test_returns_one_mode_per_phrase(self):
-        phrases = [(0, 4000), (4000, 8000)]
-        bm = _beat_map(phrases=phrases)
+    def test_returns_one_mode_per_stanza(self):
+        stanzas = [(0, 4000), (4000, 8000)]
+        bm = _beat_map(stanzas=stanzas)
         modes = classify_modes(bm)
         self.assertEqual(len(modes), 2)
 
-    def test_break_on_silent_phrase(self):
+    def test_break_on_silent_stanza(self):
         beats = [0, 500, 1000, 1500]
         energy = [0.05, 0.05, 0.08, 0.06]
-        bm = _beat_map(beats=beats, energy=energy, phrases=[(0, 2000)])
+        bm = _beat_map(beats=beats, energy=energy, stanzas=[(0, 2000)])
         modes = classify_modes(bm)
         self.assertEqual(modes[0][2], "break")
 
-    def test_tease_on_quiet_phrase(self):
+    def test_tease_on_quiet_stanza(self):
         beats = [0, 500, 1000, 1500]
         energy = [0.20, 0.22, 0.18, 0.25]
-        bm = _beat_map(beats=beats, energy=energy, phrases=[(0, 2000)])
+        bm = _beat_map(beats=beats, energy=energy, stanzas=[(0, 2000)])
         modes = classify_modes(bm)
         self.assertEqual(modes[0][2], "tease")
 
@@ -133,7 +133,7 @@ class TestClassifyModes(unittest.TestCase):
         # Second half energy much higher than first half
         beats = list(range(0, 4000, 500))
         energy = [0.3, 0.3, 0.3, 0.3, 0.6, 0.65, 0.7, 0.75]
-        bm = _beat_map(beats=beats, energy=energy, phrases=[(0, 4000)])
+        bm = _beat_map(beats=beats, energy=energy, stanzas=[(0, 4000)])
         modes = classify_modes(bm)
         self.assertEqual(modes[0][2], "edging")
 
@@ -150,21 +150,21 @@ class TestClassifyModes(unittest.TestCase):
     def test_steady_on_normal_energy_and_bpm(self):
         beats = list(range(0, 4000, 500))
         energy = [0.7] * 8
-        bm = _beat_map(bpm=120.0, beats=beats, energy=energy, phrases=[(0, 4000)])
+        bm = _beat_map(bpm=120.0, beats=beats, energy=energy, stanzas=[(0, 4000)])
         modes = classify_modes(bm)
         self.assertEqual(modes[0][2], "steady")
 
-    def test_empty_phrase_returns_break(self):
-        # Phrase range has no beats in it
-        bm = _beat_map(beats=[5000, 5500], energy=[0.8, 0.8], phrases=[(0, 1000)])
+    def test_empty_stanza_returns_break(self):
+        # Stanza range has no beats in it
+        bm = _beat_map(beats=[5000, 5500], energy=[0.8, 0.8], stanzas=[(0, 1000)])
         modes = classify_modes(bm)
         self.assertEqual(modes[0][2], "break")
 
-    def test_mode_timestamps_match_phrases(self):
-        phrases = [(0, 3000), (3000, 6000)]
+    def test_mode_timestamps_match_stanzas(self):
+        stanzas = [(0, 3000), (3000, 6000)]
         beats = list(range(0, 6000, 500))
         energy = [0.7] * len(beats)
-        bm = _beat_map(beats=beats, energy=energy, phrases=phrases)
+        bm = _beat_map(beats=beats, energy=energy, stanzas=stanzas)
         modes = classify_modes(bm)
         self.assertEqual(modes[0][0], 0)
         self.assertEqual(modes[0][1], 3000)
@@ -174,24 +174,24 @@ class TestClassifyModes(unittest.TestCase):
 
 class TestClassifyModesPerChapter(unittest.TestCase):
     """Chunk-relative classification — the architectural fix for ambient
-    flat output. Verifies a phrase that's quiet in absolute terms can
+    flat output. Verifies a stanza that's quiet in absolute terms can
     still get ``steady``/``slow``/``edging`` if it's normal-or-loud
     relative to its chapter's distribution.
     """
 
-    def test_ambient_phrase_gets_steady_when_chunk_is_uniformly_quiet(self):
+    def test_ambient_stanza_gets_steady_when_chunk_is_uniformly_quiet(self):
         """The whole-file regime would map this to break/tease. Chunk-aware
-        sees the phrase is at the chunk's median, so it's "average" → steady.
+        sees the stanza is at the chunk's median, so it's "average" → steady.
         """
         from videoflow.chapters import Chapter
         beats = list(range(0, 8000, 500))
-        # All phrases at uniform low energy 0.2 — whole-file would say tease;
+        # All stanzas at uniform low energy 0.2 — whole-file would say tease;
         # chunk-aware says everyone is at the median → steady (BPM=120, not
         # fast or slow).
         energy = [0.2] * len(beats)
         bm = _beat_map(
             bpm=120.0, beats=beats, energy=energy,
-            phrases=[(0, 4000), (4000, 8000)], duration_ms=8000,
+            stanzas=[(0, 4000), (4000, 8000)], duration_ms=8000,
         )
         whole = classify_modes(bm)
         self.assertEqual([m[2] for m in whole], ["tease", "tease"])
@@ -201,31 +201,31 @@ class TestClassifyModesPerChapter(unittest.TestCase):
         )
         self.assertEqual([m[2] for m in chapter_aware], ["steady", "steady"])
 
-    def test_truly_silent_phrase_still_gets_break_via_floor(self):
+    def test_truly_silent_stanza_still_gets_break_via_floor(self):
         """The chunk-aware regime keeps an absolute 0.10 floor for break so
-        a silent phrase can't escape break-mode just because the whole chunk
+        a silent stanza can't escape break-mode just because the whole chunk
         is silent.
         """
         from videoflow.chapters import Chapter
         beats = list(range(0, 4000, 500))
         energy = [0.02] * len(beats)
-        bm = _beat_map(beats=beats, energy=energy, phrases=[(0, 4000)])
+        bm = _beat_map(beats=beats, energy=energy, stanzas=[(0, 4000)])
         modes = classify_modes(
             bm, chapters=[Chapter(at_ms=0, end_ms=4000)],
         )
         self.assertEqual(modes[0][2], "break")
 
-    def test_phrase_below_chunk_median_gets_tease(self):
-        """A phrase below chunk median, but above the break floor, → tease."""
+    def test_stanza_below_chunk_median_gets_tease(self):
+        """A stanza below chunk median, but above the break floor, → tease."""
         from videoflow.chapters import Chapter
         beats = list(range(0, 8000, 500))
         # Chunk median ≈ 0.5 (avg of two middle values). Break floor is
         # max(0.5*0.4, 0.10) = 0.20. Tease threshold = 0.5 * 0.85 = 0.425.
-        # First phrase avg=0.30 is between break (0.20) and tease (0.425).
+        # First stanza avg=0.30 is between break (0.20) and tease (0.425).
         energy = [0.30] * 8 + [0.7] * 8
         bm = _beat_map(
             bpm=120.0, beats=beats, energy=energy,
-            phrases=[(0, 4000), (4000, 8000)], duration_ms=8000,
+            stanzas=[(0, 4000), (4000, 8000)], duration_ms=8000,
         )
         modes = classify_modes(
             bm, chapters=[Chapter(at_ms=0, end_ms=8000)],
@@ -245,7 +245,7 @@ class TestClassifyModesPerChapter(unittest.TestCase):
         bm = _beat_map(
             bpm=200.0,  # global bpm says fast
             beats=beats, energy=energy,
-            phrases=[(0, 30000)], duration_ms=30000,
+            stanzas=[(0, 30000)], duration_ms=30000,
         )
         # Whole-file: BPM 200 → fast
         self.assertEqual(classify_modes(bm)[0][2], "fast")
@@ -258,12 +258,12 @@ class TestClassifyModesPerChapter(unittest.TestCase):
         # First chunk: uniformly quiet (will steady-ify with chunk-relative)
         # Second chunk: rising energy (edging candidate)
         beats = list(range(0, 16000, 500))
-        first_phrase_energy = [0.2] * 16
-        second_phrase_energy = [0.3] * 8 + [0.9] * 8  # rising
-        energy = first_phrase_energy + second_phrase_energy
+        first_stanza_energy = [0.2] * 16
+        second_stanza_energy = [0.3] * 8 + [0.9] * 8  # rising
+        energy = first_stanza_energy + second_stanza_energy
         bm = _beat_map(
             bpm=120.0, beats=beats, energy=energy,
-            phrases=[(0, 8000), (8000, 16000)],
+            stanzas=[(0, 8000), (8000, 16000)],
             duration_ms=16000,
         )
         chapters = [
@@ -278,7 +278,7 @@ class TestClassifyModesPerChapter(unittest.TestCase):
         from videoflow.chapters import Chapter  # noqa: F401
         beats = list(range(0, 4000, 500))
         energy = [0.05] * len(beats)
-        bm = _beat_map(beats=beats, energy=energy, phrases=[(0, 4000)])
+        bm = _beat_map(beats=beats, energy=energy, stanzas=[(0, 4000)])
         whole = classify_modes(bm)
         empty_chap = classify_modes(bm, chapters=[])
         self.assertEqual(whole, empty_chap)
@@ -324,8 +324,8 @@ class TestShapeCurve(unittest.TestCase):
         shaped = shape_curve(curve, modes, low=10)
         self.assertGreaterEqual(shaped[0][1], 80)
 
-    def test_edging_builds_amplitude_over_phrase(self):
-        # Four peaks spread across phrase — last should be bigger than first
+    def test_edging_builds_amplitude_over_stanza(self):
+        # Four peaks spread across stanza — last should be bigger than first
         curve = [(0, 80), (250, 10), (500, 80), (750, 10),
                  (1000, 80), (1250, 10), (1500, 80), (1750, 10)]
         modes = [(0, 2000, "edging")]
@@ -486,7 +486,7 @@ class TestGenerateFromBeats(unittest.TestCase):
 
     def test_silent_track_produces_break_mode(self):
         beats = [0, 500, 1000, 1500]
-        bm = _beat_map(beats=beats, energy=[0.05] * 4, phrases=[(0, 2000)])
+        bm = _beat_map(beats=beats, energy=[0.05] * 4, stanzas=[(0, 2000)])
         modes = classify_modes(bm)
         self.assertEqual(modes[0][2], "break")
 

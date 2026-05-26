@@ -1,7 +1,7 @@
 """videoflow — composable audio + video pipeline for haptic content generation.
 
 Audio path is the v0.1 product surface: analyze a track for beats and energy,
-classify phrases, shape a motion curve, export a funscript. forgegen is the
+classify stanzas, shape a motion curve, export a funscript. forgegen is the
 downstream Streamlit UI on top of this.
 """
 
@@ -22,10 +22,10 @@ from videoflow.generate import (
     generate_from_beats,
     shape_curve,
 )
-from videoflow.phrases import (
-    Phrase,
-    classify_phrases,
-    classify_phrases_from_funscript,
+from videoflow.stanzas import (
+    Stanza,
+    classify_stanzas,
+    classify_stanzas_from_funscript,
 )
 from videoflow.progress import (
     ETAEstimator,
@@ -63,9 +63,9 @@ __all__ = [
     "export_funscript",
     "generate_from_beats",
     "shape_curve",
-    "Phrase",
-    "classify_phrases",
-    "classify_phrases_from_funscript",
+    "Stanza",
+    "classify_stanzas",
+    "classify_stanzas_from_funscript",
     "ETAEstimator",
     "OnProgress",
     "ProgressReporter",
