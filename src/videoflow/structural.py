@@ -33,14 +33,20 @@ from typing import Callable
 from videoflow.audio import analyze_beats as _analyze_beats
 from videoflow.audio_beats import (
     write_sidecar_from_beat_map as _beats_write_sidecar,
+    load_sidecar as _beats_load,
+    SIDECAR_VERSION as _BEATS_VERSION,
 )
 from videoflow.audio_peaks import (
     compute_sidecar_from_samples as _peaks_compute,
     write_sidecar as _peaks_write,
+    load_sidecar as _peaks_load,
+    SIDECAR_VERSION as _PEAKS_VERSION,
 )
 from videoflow.audio_spectrogram import (
     compute_sidecar_from_samples as _spectro_compute,
     write_sidecar as _spectro_write,
+    load_sidecar as _spectro_load,
+    SIDECAR_VERSION as _SPECTRO_VERSION,
 )
 from videoflow.chapter_clips import (
     chapter_clip_path as _clip_path,
@@ -49,7 +55,11 @@ from videoflow.chapter_clips import (
 from videoflow.chapters import Chapter
 from videoflow.stanzas import Stanza, classify_stanzas as _classify_stanzas
 from videoflow.progress import OnProgress, ProgressReporter
-from videoflow.sidecar import write_sidecar as _write_sidecar
+from videoflow.sidecar import (
+    write_sidecar as _write_sidecar,
+    read_sidecar as _read_sidecar,
+    chapters_from_sidecar as _chapters_from_sidecar,
+)
 
 _VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -258,6 +268,70 @@ class AutoChapterError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
+# Resume helpers — skip-if-exists freshness probes
+# ---------------------------------------------------------------------------
+
+def _sidecar_fresh(load_fn, version: str, media_path: Path) -> bool:
+    """True when *load_fn* finds a sidecar whose ``version`` matches *version*."""
+    try:
+        doc = load_fn(media_path)
+    except Exception:
+        return False
+    return bool(doc) and doc.get("version") == version
+
+
+def _audio_sidecars_fresh(media_path: Path) -> bool:
+    """True when peaks + spectrogram + beats sidecars all exist at the
+    current SIDECAR_VERSION."""
+    return (
+        _sidecar_fresh(_peaks_load, _PEAKS_VERSION, media_path)
+        and _sidecar_fresh(_spectro_load, _SPECTRO_VERSION, media_path)
+        and _sidecar_fresh(_beats_load, _BEATS_VERSION, media_path)
+    )
+
+
+def _final_sidecar_complete(doc: dict | None) -> bool:
+    """True when the merged chapters sidecar carries chapters + stanzas +
+    energy — i.e. the final ``sidecar`` stage finished on a prior run."""
+    if not doc:
+        return False
+    return bool(doc.get("chapters")) and bool(doc.get("stanzas")) and bool(doc.get("energy"))
+
+
+def _extract_chapter_clips(media_path: Path, chapters, reporter, progress) -> None:
+    """Build any missing per-chapter mp4 clips, then ``reporter.complete``.
+
+    Self-resuming: clips already on disk (matched by versioned filename) are
+    left in place. Shared by the normal pipeline tail and the resume
+    short-circuit. The caller owns the ``reporter.stage("chapter_clips")``.
+    """
+    ranges: list[tuple[int, int]] = []
+    for ch in chapters:
+        if ch.end_ms is None:
+            continue
+        ranges.append((int(ch.at_ms), int(ch.end_ms)))
+    total = len(ranges)
+    built = 0
+    cached = 0
+    for i, (start_ms, end_ms) in enumerate(ranges):
+        out = _clip_path(media_path, start_ms, end_ms)
+        if out.exists():
+            cached += 1
+        else:
+            progress(f"Extracting chapter clip {i + 1}/{total}…")
+            try:
+                _extract_clip(media_path, start_ms, end_ms, out)
+                built += 1
+            except (RuntimeError, FileNotFoundError) as exc:
+                # Don't abort the whole pipeline if a single clip fails —
+                # the editor's Rust fallback rebuilds on-click if needed.
+                progress(f"Chapter clip {i + 1} failed: {exc}")
+    reporter.complete(
+        summary=f"{built + cached}/{total} clips ready ({cached} cached, {built} built)",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -269,6 +343,7 @@ def auto_chapter(
     on_progress: OnProgress | None = None,
     write_sidecar: bool = True,
     force: bool = False,
+    resume: bool = False,
     sr: int = 22050,
 ) -> list[Chapter]:
     """Detect natural chapter boundaries in a media file.
@@ -302,6 +377,20 @@ def auto_chapter(
         force: Deprecated. Retained for back-compat with v0.0.4 callers.
             The merge model in :mod:`videoflow.sidecar` preserves user
             data automatically, so this flag is a no-op as of v0.0.5.
+        resume: When ``True`` (and *write_sidecar* is on), skip stages
+            whose output already exists on disk instead of recomputing
+            from scratch — for picking up after the app was killed
+            mid-analyze. If the whole audio half already completed (the
+            merged ``<stem>.chapters.json`` carries chapters + stanzas +
+            energy AND all three audio sidecars match the current
+            version), the decode/detect/beats/sidecar work is skipped
+            entirely and only ``chapter_clips`` runs (it already resumes
+            per-clip). Otherwise the front half re-runs (its in-memory
+            products are needed) but any audio sidecar that already
+            exists at the current version is not recomputed. Skip =
+            "output present", not full reactive invalidation — a user
+            edit that should invalidate downstream stages is out of
+            scope; use a full (non-resume) re-analyze for that.
         sr: Sample rate for analysis. 22050 is the librosa standard
             for beat / structure work; lower values speed analysis on
             multi-hour files at the cost of fine-grain resolution.
@@ -339,6 +428,40 @@ def auto_chapter(
     chapters: list[Chapter] = []
     beat_map = None
     stanzas: list[Stanza] = []
+
+    # Resume short-circuit — when a prior run already finished the whole audio
+    # half (merged sidecar carries chapters + stanzas + energy AND all three
+    # audio sidecars match the current version), skip decode/detect/beats/
+    # sidecar entirely and only run chapter_clips (it self-resumes per clip).
+    # This is the dominant "killed during chapter_clips on a 4K source" case.
+    if resume and write_sidecar:
+        try:
+            _resume_doc = _read_sidecar(media_path)
+        except Exception:
+            _resume_doc = None
+        if (
+            _resume_doc is not None
+            and _final_sidecar_complete(_resume_doc)
+            and _audio_sidecars_fresh(media_path)
+        ):
+            chapters = _chapters_from_sidecar(_resume_doc)
+            with reporter.stage("structural.auto_chapter"):
+                for _name in (
+                    "extract", "load", "detect", "chapters_sidecar",
+                    "beats", "classify", "audio_peaks", "spectrogram",
+                    "audio_beats", "sidecar",
+                ):
+                    with reporter.stage(_name):
+                        reporter.complete(summary="cached (resume)")
+                if media_path.suffix.lower() in _VIDEO_SUFFIXES:
+                    with reporter.stage("chapter_clips"):
+                        _extract_chapter_clips(
+                            media_path, chapters, reporter, _progress,
+                        )
+                reporter.complete(
+                    summary=f"{len(chapters)} chapters (resumed)",
+                )
+            return chapters
 
     with reporter.stage("structural.auto_chapter"):
         with reporter.stage("extract"):
@@ -447,32 +570,38 @@ def auto_chapter(
             # clean of disk writes.
             if write_sidecar:
                 with reporter.stage("audio_peaks"):
-                    _progress("Computing audio peaks…")
-                    peaks_data = _peaks_compute(y, sr=sr_)
-                    if peaks_data is not None:
-                        _peaks_write(media_path, peaks_data)
-                        reporter.complete(
-                            summary=(
-                                f"{peaks_data['peak_count']} peaks @ "
-                                f"{peaks_data['hop_ms']}ms"
-                            ),
-                        )
+                    if resume and _sidecar_fresh(_peaks_load, _PEAKS_VERSION, media_path):
+                        reporter.complete(summary="cached (resume)")
                     else:
-                        reporter.complete(summary="skipped (degenerate input)")
+                        _progress("Computing audio peaks…")
+                        peaks_data = _peaks_compute(y, sr=sr_)
+                        if peaks_data is not None:
+                            _peaks_write(media_path, peaks_data)
+                            reporter.complete(
+                                summary=(
+                                    f"{peaks_data['peak_count']} peaks @ "
+                                    f"{peaks_data['hop_ms']}ms"
+                                ),
+                            )
+                        else:
+                            reporter.complete(summary="skipped (degenerate input)")
 
                 with reporter.stage("spectrogram"):
-                    _progress("Computing mel spectrogram…")
-                    spec_data = _spectro_compute(y, sr=sr_)
-                    if spec_data is not None:
-                        _spectro_write(media_path, spec_data)
-                        reporter.complete(
-                            summary=(
-                                f"{spec_data['n_frames']} frames × "
-                                f"{spec_data['n_mels']} mel bins"
-                            ),
-                        )
+                    if resume and _sidecar_fresh(_spectro_load, _SPECTRO_VERSION, media_path):
+                        reporter.complete(summary="cached (resume)")
                     else:
-                        reporter.complete(summary="skipped (degenerate input)")
+                        _progress("Computing mel spectrogram…")
+                        spec_data = _spectro_compute(y, sr=sr_)
+                        if spec_data is not None:
+                            _spectro_write(media_path, spec_data)
+                            reporter.complete(
+                                summary=(
+                                    f"{spec_data['n_frames']} frames × "
+                                    f"{spec_data['n_mels']} mel bins"
+                                ),
+                            )
+                        else:
+                            reporter.complete(summary="skipped (degenerate input)")
 
                 # Beats sidecar — pure write of the AudioBeatMap that
                 # was already built in the beats stage above. No second
@@ -481,14 +610,17 @@ def auto_chapter(
                 # editing flows will snap actions to beat times.
                 if beat_map is not None:
                     with reporter.stage("audio_beats"):
-                        _progress("Writing beats sidecar…")
-                        _beats_write_sidecar(media_path, beat_map)
-                        reporter.complete(
-                            summary=(
-                                f"{len(beat_map.beats)} beats @ "
-                                f"{beat_map.bpm:.1f} BPM"
-                            ),
-                        )
+                        if resume and _sidecar_fresh(_beats_load, _BEATS_VERSION, media_path):
+                            reporter.complete(summary="cached (resume)")
+                        else:
+                            _progress("Writing beats sidecar…")
+                            _beats_write_sidecar(media_path, beat_map)
+                            reporter.complete(
+                                summary=(
+                                    f"{len(beat_map.beats)} beats @ "
+                                    f"{beat_map.bpm:.1f} BPM"
+                                ),
+                            )
 
                 # Final sidecar merge — adds `stanzas` + `energy` to the
                 # chapters-only file already on disk (from the earlier
@@ -544,41 +676,8 @@ def auto_chapter(
                 # already playable directly).
                 if media_path.suffix.lower() in _VIDEO_SUFFIXES:
                     with reporter.stage("chapter_clips"):
-                        ranges: list[tuple[int, int]] = []
-                        for ch in chapters:
-                            if ch.end_ms is None:
-                                continue
-                            ranges.append((int(ch.at_ms), int(ch.end_ms)))
-                        total = len(ranges)
-                        built = 0
-                        cached = 0
-                        for i, (start_ms, end_ms) in enumerate(ranges):
-                            out = _clip_path(media_path, start_ms, end_ms)
-                            if out.exists():
-                                cached += 1
-                            else:
-                                _progress(
-                                    f"Extracting chapter clip {i + 1}/{total}…"
-                                )
-                                try:
-                                    _extract_clip(
-                                        media_path, start_ms, end_ms, out,
-                                    )
-                                    built += 1
-                                except (RuntimeError, FileNotFoundError) as exc:
-                                    # Don't abort the whole pipeline if a
-                                    # single clip fails — the editor's
-                                    # Rust fallback will rebuild on-click
-                                    # if needed, and the rest of the
-                                    # chapter analysis is still valid.
-                                    _progress(
-                                        f"Chapter clip {i + 1} failed: {exc}"
-                                    )
-                        reporter.complete(
-                            summary=(
-                                f"{built + cached}/{total} clips ready "
-                                f"({cached} cached, {built} built)"
-                            ),
+                        _extract_chapter_clips(
+                            media_path, chapters, reporter, _progress,
                         )
         finally:
             if _tmp is not None:

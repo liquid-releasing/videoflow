@@ -418,7 +418,10 @@ class TestAutoChapterEmitsExpandedSidecar(unittest.TestCase):
             )
             auto_chapter(path, write_sidecar=True)
 
-            sidecar = path.with_name("track.chapters.json")
+            # Sidecars live in the per-project .<stem>.forge/ cache dir
+            # (the .forge migration moved them off the sibling path).
+            from videoflow.sidecar import sidecar_path_for
+            sidecar = Path(sidecar_path_for(path))
             self.assertTrue(sidecar.exists())
             doc = json.loads(sidecar.read_text(encoding="utf-8"))
 
@@ -439,6 +442,85 @@ class TestAutoChapterEmitsExpandedSidecar(unittest.TestCase):
             self.assertEqual(
                 doc["provenance"][-1]["writer"], "videoflow.structural",
             )
+
+
+class TestAutoChapterResume(unittest.TestCase):
+    """`resume=True` skips stages whose output already exists on disk."""
+
+    def test_tier2_recomputes_only_the_missing_audio_sidecar(self):
+        """Delete one audio sidecar, resume → just that one recomputes; the
+        others stay cached (their compute labels never fire)."""
+        from videoflow.audio_spectrogram import sidecar_path as spectro_sidecar
+
+        sr = 22050
+        with TemporaryDirectory() as td:
+            wav = Path(td) / "track.wav"
+            _save_wav(wav, _sine(30.0, 440, sr), sr)
+
+            # First full pass writes peaks + spectrogram + beats sidecars.
+            auto_chapter(wav, write_sidecar=True)
+            spec_path = Path(spectro_sidecar(wav))
+            self.assertTrue(spec_path.exists())
+
+            # Drop the spectrogram sidecar, then resume.
+            spec_path.unlink()
+            labels: list[str] = []
+            auto_chapter(
+                wav, write_sidecar=True, resume=True,
+                progress_callback=labels.append,
+            )
+
+            # Spectrogram recomputed…
+            self.assertTrue(spec_path.exists())
+            self.assertIn("Computing mel spectrogram…", labels)
+            # …peaks + beats stayed cached (their compute labels are absent).
+            self.assertNotIn("Computing audio peaks…", labels)
+            self.assertNotIn("Writing beats sidecar…", labels)
+
+    def test_tier1_short_circuits_when_audio_half_complete(self):
+        """When the merged sidecar (chapters+stanzas+energy) and all three
+        audio sidecars are present, resume skips the whole decode/detect/beats
+        half — audio is never re-loaded."""
+        complete_doc = {
+            "chapters": [
+                {"at_ms": 0, "end_ms": 30000,
+                 "content_type": "calm", "confidence": 0.5},
+            ],
+            "stanzas": [{"at_ms": 0, "end_ms": 30000, "mode": "steady"}],
+            "energy": {"beat_map": {}},
+        }
+        sr = 22050
+        with TemporaryDirectory() as td:
+            wav = Path(td) / "track.wav"
+            _save_wav(wav, _sine(2.0, 440, sr), sr)  # tiny — must NOT be decoded
+            with patch(
+                "videoflow.structural._read_sidecar", return_value=complete_doc,
+            ), patch(
+                "videoflow.structural._audio_sidecars_fresh", return_value=True,
+            ), patch(
+                "videoflow.structural._prepare_audio",
+                side_effect=AssertionError("audio re-loaded on a complete resume"),
+            ):
+                chapters = auto_chapter(wav, write_sidecar=True, resume=True)
+            self.assertEqual(len(chapters), 1)
+            self.assertEqual(chapters[0].at_ms, 0)
+
+    def test_resume_off_by_default_recomputes_everything(self):
+        """Without resume, a present sidecar is still recomputed (the compute
+        label fires) — resume must be opt-in."""
+        sr = 22050
+        with TemporaryDirectory() as td:
+            wav = Path(td) / "track.wav"
+            _save_wav(wav, _sine(30.0, 440, sr), sr)
+            auto_chapter(wav, write_sidecar=True)  # sidecars now exist
+
+            labels: list[str] = []
+            auto_chapter(
+                wav, write_sidecar=True,  # resume defaults False
+                progress_callback=labels.append,
+            )
+            self.assertIn("Computing audio peaks…", labels)
+            self.assertIn("Computing mel spectrogram…", labels)
 
 
 if __name__ == "__main__":
