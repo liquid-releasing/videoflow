@@ -58,7 +58,7 @@ class TestBeatsToCurve(unittest.TestCase):
 
     def test_returns_one_point_per_beat(self):
         bm = _beat_map()
-        curve = beats_to_curve(bm)
+        curve = beats_to_curve(bm, depth_model="energy")
         self.assertEqual(len(curve), len(bm.beats))
 
     def test_even_beats_are_peaks(self):
@@ -69,12 +69,12 @@ class TestBeatsToCurve(unittest.TestCase):
 
     def test_odd_beats_are_troughs(self):
         bm = _beat_map(beats=[0, 500, 1000], energy=[1.0, 1.0, 1.0])
-        curve = beats_to_curve(bm, low=10, high=90)
+        curve = beats_to_curve(bm, low=10, high=90, depth_model="energy")
         self.assertEqual(curve[1][1], 10)  # beat 1 = trough
 
     def test_alternating_high_low(self):
         bm = _beat_map(beats=list(range(0, 4000, 500)), energy=[1.0] * 8)
-        curve = beats_to_curve(bm, low=10, high=90)
+        curve = beats_to_curve(bm, low=10, high=90, depth_model="energy")
         for i, (_, pos) in enumerate(curve):
             if i % 2 == 0:
                 self.assertGreater(pos, 10)
@@ -83,12 +83,12 @@ class TestBeatsToCurve(unittest.TestCase):
 
     def test_high_energy_produces_high_peak(self):
         bm = _beat_map(beats=[0, 500], energy=[1.0, 0.0])
-        curve = beats_to_curve(bm, low=10, high=90)
+        curve = beats_to_curve(bm, low=10, high=90, depth_model="energy")
         self.assertEqual(curve[0][1], 90)  # max energy = max peak
 
     def test_low_energy_still_produces_min_stroke(self):
         bm = _beat_map(beats=[0, 500], energy=[0.0, 0.0])
-        curve = beats_to_curve(bm, low=10, high=90, min_stroke=20)
+        curve = beats_to_curve(bm, low=10, high=90, min_stroke=20, depth_model="energy")
         self.assertEqual(curve[0][1], 30)  # low + min_stroke
 
     def test_positions_clamped_to_100(self):
@@ -99,7 +99,7 @@ class TestBeatsToCurve(unittest.TestCase):
     def test_timestamps_match_beats(self):
         beats = [0, 484, 968, 1452]
         bm = _beat_map(beats=beats, energy=[0.8] * 4)
-        curve = beats_to_curve(bm)
+        curve = beats_to_curve(bm, depth_model="energy")
         self.assertEqual([t for t, _ in curve], beats)
 
 
@@ -453,7 +453,7 @@ class TestGenerateFromBeats(unittest.TestCase):
     def test_action_count_matches_beats(self):
         beats = list(range(0, 8000, 500))
         bm = _beat_map(beats=beats, energy=[0.8] * len(beats))
-        path = generate_from_beats(bm, self.tmp / "out.funscript")
+        path = generate_from_beats(bm, self.tmp / "out.funscript", depth_model="energy")
         data = json.loads(path.read_text())
         self.assertEqual(len(data["actions"]), len(beats))
 
@@ -533,7 +533,7 @@ class TestStrokeDensity(unittest.TestCase):
 
     def test_centered_density_1_one_action_per_beat(self):
         bm = _beat_map(beats=[0, 500, 1000, 1500], energy=[1.0] * 4)
-        curve = beats_to_curve(bm, center=50, stroke_density=1)
+        curve = beats_to_curve(bm, center=50, stroke_density=1, depth_model="energy")
         self.assertEqual(len(curve), 4)
 
     def test_centered_density_2_matches_full_alias(self):
@@ -584,7 +584,7 @@ class TestStrokeDensity(unittest.TestCase):
 
     def test_legacy_density_4_four_actions_per_beat(self):
         bm = _beat_map(beats=[0, 1000, 2000], energy=[1.0] * 3)
-        curve = beats_to_curve(bm, low=10, high=90, stroke_density=4)
+        curve = beats_to_curve(bm, low=10, high=90, stroke_density=4, depth_model="energy")
         self.assertEqual(len(curve), 12)
         # Even slots = peak (at high), odd = trough (at low)
         self.assertGreaterEqual(curve[0][1], 50)

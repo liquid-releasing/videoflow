@@ -86,6 +86,23 @@ _MODE_HIGH_SCALE: dict[str, float] = {
 _VALID_MODES = frozenset(_MODE_HIGH_SCALE)
 
 
+#: Fixed-depth model: fraction of a FULL half-stroke (50 → rail) per mode.
+#: 1.0 = rail-to-rail (the bimodal backbone). Partials add the deliberate
+#: middle texture the hand-made gold keeps (~20-25 % of points), WITHOUT
+#: collapsing the whole distribution to a centered bell. Proven independently
+#: via audio energy (bench) and video optical flow (FF-Flow timing + snap):
+#: depth must be FIXED, not signal-scaled — the signal drives timing/density,
+#: never amplitude. break/tease are the only deliberately-shallow modes.
+_MODE_DEPTH: dict[str, float] = {
+    "break":  0.55,  # softened but still moving (not a near-still bell)
+    "tease":  0.72,  # restrained, partial — the bulk of the middle texture
+    "slow":   0.90,  # nearly full, unhurried
+    "steady": 1.00,  # full rails
+    "fast":   1.00,  # full rails
+    "edging": 1.00,  # full rails
+}
+
+
 # ---------------------------------------------------------------------------
 # Step 1 — Raw motion curve
 # ---------------------------------------------------------------------------
@@ -101,8 +118,25 @@ def beats_to_curve(
     tone_per_stanza: list[tuple[int, int, int, int]] | None = None,
     energy_normalize: bool = False,
     stroke_density: object = "half",
+    depth_model: str = "fixed",
+    gate: float = 0.10,
+    modes: list[tuple[int, int, str]] | None = None,
 ) -> list[tuple[int, int]]:
     """Convert an :class:`~videoflow.audio.AudioBeatMap` into a raw motion curve.
+
+    **Depth models** (``depth_model``):
+
+    - **fixed** (default): full-depth backbone — every surviving beat strokes
+        rail-to-rail (around ``center``, default 50). Energy is a *gate*
+        (beats below ``gate`` on the 0-1 normalised scale are dropped →
+        density modulation), NOT an amplitude scale. ``modes`` apply
+        per-beat *partial* depth via :data:`_MODE_DEPTH` for the gold's
+        middle texture. This is the bimodal model — strokes reach the rails.
+        ``shape_curve`` must be skipped (shaping is folded in here).
+    - **energy** (legacy): peak height scales with energy — loud beats tall,
+        quiet beats small. Produces a centered bell; kept for back-compat
+        and the pre-0.0.8 calling convention. Honours ``low``/``high``/
+        ``min_stroke`` and is refined afterwards by :func:`shape_curve`.
 
     Each beat produces one point in the curve. Positions alternate between a
     high peak and a low trough so the device strokes on every beat. The peak
@@ -150,11 +184,20 @@ def beats_to_curve(
     # values never approach 1.0. Capped at 1.0 so a single outlier beat
     # doesn't suppress everything else.
     energies = list(beat_map.energy)
-    if energy_normalize and energies:
+    # Always compute a 0-1 normalised copy (95th-pct = 1.0) for the gate
+    # decision, independent of the legacy energy_normalize amplitude flag.
+    beats_count = len(beat_map.beats)
+    if energies:
         sorted_e = sorted(energies)
         ref = sorted_e[int(len(sorted_e) * 0.95)] or sorted_e[-1]
-        if ref > 0:
-            energies = [min(1.0, e / ref) for e in energies]
+        norm_energies = (
+            [min(1.0, e / ref) for e in energies] if ref > 0 else list(energies)
+        )
+    else:
+        # No energy track — disable gating (every beat fires at full depth).
+        norm_energies = [1.0] * beats_count
+    if energy_normalize and energies:
+        energies = list(norm_energies)
 
     # Pre-compute half-beat durations for "full" density mode
     beats_list = list(beat_map.beats)
@@ -199,6 +242,42 @@ def beats_to_curve(
         return center if center is not None else 0  # 0 = unused in legacy path
 
     curve: list[tuple[int, int]] = []
+
+    # ---- Fixed-depth model (default) — the bimodal backbone --------------
+    # Each surviving (gated) beat emits a self-contained full stroke toward
+    # the rails. Energy gates *which* beats fire (density); modes set partial
+    # depth (texture). Depth never scales with the signal — that's the law.
+    if depth_model == "fixed":
+        def _mode_at(t: int) -> str:
+            if not modes:
+                return "steady"
+            for s, e, m in modes:
+                if s <= t < e:
+                    return m
+            return modes[-1][2]
+
+        # Default center 50 unless a trajectory/tone/explicit center is set.
+        moving_center = (
+            center is not None
+            or center_trajectory is not None
+            or tone_per_stanza is not None
+        )
+        # At least 2 points per surviving beat so each beat is a complete
+        # stroke (peak→trough) — gating can drop neighbours without breaking
+        # cross-beat alternation.
+        n_pts = max(2, actions_per_beat)
+        for i, beat_ms in enumerate(beats_list):
+            if norm_energies[i] < gate:
+                continue
+            depth = _MODE_DEPTH.get(_mode_at(beat_ms), 1.0)
+            half = 50.0 * depth
+            beat_dur = _next_dur(i)
+            for k in range(n_pts):
+                t = beat_ms + (k * beat_dur) // n_pts
+                c = center_at(t) if moving_center else 50
+                pos = c + half if k % 2 == 0 else c - half
+                curve.append((t, max(0, min(100, round(pos)))))
+        return curve
 
     use_centered = (
         center is not None
@@ -537,6 +616,8 @@ def generate_from_beats(
     tone_per_stanza: list[tuple[int, int, int, int]] | None = None,
     energy_normalize: bool = False,
     stroke_density: object = "half",
+    depth_model: str = "fixed",
+    gate: float = 0.10,
     title: str = "",
     on_progress: "OnProgress | None" = None,
     progress_callback: "Callable[[str], None] | None" = None,
@@ -580,6 +661,13 @@ def generate_from_beats(
 
     reporter = ProgressReporter(on_progress)
     with reporter.stage("generate"):
+        # Classify first — the fixed-depth model folds mode-aware partials
+        # into the curve, so modes must exist before beats_to_curve runs.
+        with reporter.stage("classify"):
+            _progress("Classifying stanza modes…")
+            modes = classify_modes(beat_map)
+            reporter.complete(summary=f"{len(modes)} mode segments")
+
         with reporter.stage("curve"):
             _progress("Generating motion curve…")
             curve = beats_to_curve(
@@ -589,23 +677,28 @@ def generate_from_beats(
                 tone_per_stanza=tone_per_stanza,
                 energy_normalize=energy_normalize,
                 stroke_density=stroke_density,
+                depth_model=depth_model,
+                gate=gate,
+                modes=modes,
             )
             reporter.complete(summary=f"{len(curve)} curve points")
 
-        with reporter.stage("classify"):
-            _progress("Classifying stanza modes…")
-            modes = classify_modes(beat_map)
-            reporter.complete(summary=f"{len(modes)} mode segments")
-
         with reporter.stage("shape"):
-            _progress("Shaping curve per mode…")
-            shaped = shape_curve(
-                curve, modes,
-                low=low, center=center,
-                center_trajectory=center_trajectory,
-                tone_per_stanza=tone_per_stanza,
-            )
-            reporter.complete(summary=f"{len(shaped)} actions shaped")
+            if depth_model == "fixed":
+                # Shaping is folded into the fixed-depth curve — skip the
+                # legacy compression pass (it would collapse the rails).
+                _progress("Fixed-depth curve — shaping folded in…")
+                shaped = curve
+                reporter.complete(summary=f"{len(shaped)} actions (fixed)")
+            else:
+                _progress("Shaping curve per mode…")
+                shaped = shape_curve(
+                    curve, modes,
+                    low=low, center=center,
+                    center_trajectory=center_trajectory,
+                    tone_per_stanza=tone_per_stanza,
+                )
+                reporter.complete(summary=f"{len(shaped)} actions shaped")
 
         with reporter.stage("export"):
             _progress("Writing funscript…")
@@ -655,6 +748,8 @@ def generate_from_beats_per_chapter(
     *,
     low: int = 10,
     high: int = 90,
+    depth_model: str = "fixed",
+    gate: float = 0.10,
     title: str = "",
     generated_from: dict | None = None,
     progress_callback: "Callable[[str], None] | None" = None,
@@ -717,20 +812,26 @@ def generate_from_beats_per_chapter(
 
         density = recipe.get("stroke_density", "half")
 
+        modes = classify_modes(sliced)
         curve = beats_to_curve(
             sliced,
             low=low, high=high,
             center_trajectory=traj,
             tone_per_stanza=tone_per_stanza,
             stroke_density=density,
+            depth_model=depth_model,
+            gate=gate,
+            modes=modes,
         )
-        modes = classify_modes(sliced)
-        shaped = shape_curve(
-            curve, modes,
-            low=low,
-            center_trajectory=traj,
-            tone_per_stanza=tone_per_stanza,
-        )
+        if depth_model == "fixed":
+            shaped = curve  # fixed-depth folds shaping in
+        else:
+            shaped = shape_curve(
+                curve, modes,
+                low=low,
+                center_trajectory=traj,
+                tone_per_stanza=tone_per_stanza,
+            )
         all_actions.extend(shaped)
 
     if not all_actions:
