@@ -184,6 +184,29 @@ _TRACKERS = ("auto", "beat_track", "plp")
 PLP_AUTO_DURATION_MS = 10 * 60 * 1000  # 10 minutes
 
 
+def _coverage_shortfall(
+    decoded_ms: int, source_ms: int, *, tol: float = 0.02, min_gap_ms: int = 5000,
+) -> str | None:
+    """Return a warning string if the decoded audio is materially shorter
+    than the source's reported duration, else ``None``.
+
+    Guards against silent truncation: a corrupt audio stream can make the
+    decoder stop partway yet still "succeed" (ffmpeg exits 0), yielding a
+    short track with no error. Pure + side-effect-free so it's unit-testable.
+    """
+    if source_ms <= 0:
+        return None
+    if decoded_ms >= source_ms * (1 - tol):
+        return None
+    if (source_ms - decoded_ms) < min_gap_ms:
+        return None
+    return (
+        f"⚠ audio decode truncated: {decoded_ms / 60000:.1f} of "
+        f"{source_ms / 60000:.1f} min ({decoded_ms * 100 // source_ms}%) — "
+        f"source audio may be corrupt; output will be incomplete."
+    )
+
+
 def analyze_beats(
     input: str | Path,
     *,
@@ -324,6 +347,12 @@ def analyze_beats(
             'Install it with: pip install "videoflow[audio]"'
         )
 
+    # Reclaim temp WAVs orphaned by previously-killed analyses — a kill
+    # bypasses the finally that normally unlinks them, so they pile up and
+    # silently fill the user's disk. Cheap (one dir scan); runs each call.
+    from videoflow.tempfiles import audio_temp_dir, sweep_audio_temp
+    sweep_audio_temp()
+
     with reporter.stage("audio.analyze"):
         # For video files, extract audio to a temp WAV via FFmpeg first.
         _tmp_audio = None
@@ -342,7 +371,9 @@ def analyze_beats(
                         _ffmpeg = str(_candidate)
                         break
 
-                _tmp_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                _tmp_audio = tempfile.NamedTemporaryFile(
+                    suffix=".wav", delete=False, dir=str(audio_temp_dir()),
+                )
                 _tmp_audio.close()
                 try:
                     # Lazy import to avoid hoisting structural's heavy deps
@@ -376,6 +407,17 @@ def analyze_beats(
                 reporter.complete(
                     summary=f"{duration_ms / 1000:.1f}s @ {sr_} Hz mono",
                 )
+
+            # Coverage guard — surface silent truncation (corrupt stream that
+            # the decoder bails on yet "succeeds"). Compare decoded length to
+            # the source's reported duration; warn loudly, don't fail.
+            try:
+                _src_ms = round(_librosa.get_duration(path=str(input)) * 1000)
+            except Exception:
+                _src_ms = 0
+            _cov_warn = _coverage_shortfall(duration_ms, _src_ms)
+            if _cov_warn:
+                _progress(_cov_warn)
 
             # Select the signal used for beat tracking and energy.
             # HPSS separates harmonic (voice, melody) from percussive (drums).

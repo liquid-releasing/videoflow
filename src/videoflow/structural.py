@@ -719,7 +719,13 @@ def _prepare_audio(
             ffmpeg = str(candidate)
             break
 
-    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    # Reclaim WAVs orphaned by previously-killed runs (a kill bypasses the
+    # caller's cleanup finally), then extract into the same dedicated dir.
+    from videoflow.tempfiles import audio_temp_dir, sweep_audio_temp
+    sweep_audio_temp()
+    tmp = tempfile.NamedTemporaryFile(
+        suffix=".wav", delete=False, dir=str(audio_temp_dir()),
+    )
     tmp.close()
     try:
         rc = _run_ffmpeg_with_progress(
