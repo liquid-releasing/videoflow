@@ -712,5 +712,74 @@ class TestAnalyzeBeatsWithChapters(unittest.TestCase):
         self.assertTrue(all(b >= 500 for b in result.beats))
 
 
+class TestTempoOctaveCorrection(unittest.TestCase):
+    """The tempo-octave guard — folds a doubled tempo back to the felt pulse
+    without touching genuinely fast tracks. Pure function, no librosa.
+
+    Validated on Rhythms of Desire: free-run 235 BPM generated 7.7 actions/s
+    vs the gold's 4.2; folding to 117 BPM landed at 3.9.
+    """
+
+    def setUp(self):
+        from videoflow.audio import _correct_tempo_octave
+        self.fold = _correct_tempo_octave
+
+    def _beats(self, n, interval=250):
+        return [i * interval for i in range(n)]
+
+    def test_doubled_tempo_is_halved(self):
+        beats = self._beats(8, 250)
+        energy = [1.0] * 8
+        bpm, b, e = self.fold(235.0, beats, energy)
+        self.assertAlmostEqual(bpm, 117.5)
+        self.assertEqual(len(b), 4)
+        self.assertEqual(len(e), len(b))       # stays index-aligned
+
+    def test_normal_tempo_untouched(self):
+        beats = self._beats(8, 500)
+        energy = [1.0] * 8
+        bpm, b, e = self.fold(120.0, beats, energy)
+        self.assertEqual(bpm, 120.0)
+        self.assertEqual(b, beats)
+        self.assertEqual(e, energy)
+
+    def test_at_ceiling_untouched(self):
+        # 160 <= 165 ceiling → left alone (a genuinely fast track).
+        bpm, _b, _e = self.fold(160.0, self._beats(8, 375), [1.0] * 8)
+        self.assertEqual(bpm, 160.0)
+
+    def test_keeps_higher_energy_phase(self):
+        # Even-indexed beats carry the energy → odd phase must drop.
+        beats = self._beats(8, 250)
+        energy = [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]
+        _bpm, b, _e = self.fold(235.0, beats, energy)
+        self.assertEqual(b, beats[0::2])       # kept the strong on-beats
+
+    def test_keeps_odd_phase_when_stronger(self):
+        beats = self._beats(8, 250)
+        energy = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]
+        _bpm, b, _e = self.fold(235.0, beats, energy)
+        self.assertEqual(b, beats[1::2])
+
+    def test_quadrupled_tempo_folds_twice(self):
+        beats = self._beats(16, 125)
+        energy = [1.0] * 16
+        bpm, b, _e = self.fold(360.0, beats, energy)
+        self.assertAlmostEqual(bpm, 90.0)      # 360 → 180 → 90
+        self.assertEqual(len(b), 4)
+
+    def test_empty_energy_defaults_to_even_phase(self):
+        beats = self._beats(8, 250)
+        bpm, b, e = self.fold(235.0, beats, [])
+        self.assertEqual(b, beats[0::2])
+        self.assertEqual(e, [])
+
+    def test_too_few_beats_not_folded(self):
+        # Even a high BPM is left alone if there's nothing to fold.
+        bpm, b, _e = self.fold(235.0, [0, 250], [1.0, 1.0])
+        self.assertEqual(bpm, 235.0)
+        self.assertEqual(b, [0, 250])
+
+
 if __name__ == "__main__":
     unittest.main()

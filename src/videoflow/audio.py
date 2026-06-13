@@ -484,6 +484,56 @@ def analyze_beats(
 
 
 # ---------------------------------------------------------------------------
+# Tempo-octave correction
+# ---------------------------------------------------------------------------
+#
+# Audio beat trackers can lock onto a metrical harmonic and report double
+# (or quadruple) the *felt* tempo — e.g. tracking eighth-notes as beats. That
+# inflates downstream stroke density ~2x everywhere. Validated on Rhythms of
+# Desire: free-run reports 235 BPM and generates 7.7 actions/s, while the gold
+# hand-script sits at 4.2 actions/s; folding the octave to 117 BPM lands the
+# generator at 3.9 actions/s — essentially on the gold. (Video optical-flow
+# timing wouldn't need this — each reversal is a literal stroke — but audio
+# infers periodicity and is prone to the octave error.)
+
+_TEMPO_OCTAVE_CEILING = 165.0  # BPM above which the felt pulse is likely half
+_TEMPO_OCTAVE_FLOOR = 70.0     # never fold below this (would undershoot)
+
+
+def _correct_tempo_octave(
+    bpm: float,
+    beats_ms: list[int],
+    energy: list[float],
+    *,
+    ceiling: float = _TEMPO_OCTAVE_CEILING,
+    floor: float = _TEMPO_OCTAVE_FLOOR,
+) -> tuple[float, list[int], list[float]]:
+    """Fold a doubled tempo octave back toward the felt pulse.
+
+    Returns ``(bpm, beats, energy)``. A no-op unless ``bpm`` is above
+    ``ceiling`` *and* halving stays at or above ``floor`` — so a genuinely
+    fast track is left alone. When it folds, it keeps whichever phase
+    (even- vs odd-indexed beats) carries more total energy, so the strong
+    on-beats (kicks / snares) survive and the off-beats drop. Folds
+    repeatedly to handle a quadrupled octave (rare). ``energy`` stays
+    index-aligned with ``beats`` throughout.
+    """
+    while (
+        bpm > ceiling
+        and bpm / 2.0 >= floor
+        and len(beats_ms) >= 4
+    ):
+        if energy and len(energy) == len(beats_ms):
+            keep = 0 if sum(energy[0::2]) >= sum(energy[1::2]) else 1
+        else:
+            keep = 0
+        beats_ms = beats_ms[keep::2]
+        energy = energy[keep::2] if energy else energy
+        bpm = bpm / 2.0
+    return bpm, beats_ms, energy
+
+
+# ---------------------------------------------------------------------------
 # Internal — per-buffer analysis core
 # ---------------------------------------------------------------------------
 
@@ -552,13 +602,6 @@ def _analyze_buffer(
         beats_ms = [round(float(t) * 1000) + time_offset_ms for t in beat_times]
 
     progress("Computing stanzas + per-beat energy…")
-    downbeats_ms = beats_ms[::4]
-
-    stanzas: list[tuple[int, int]] = []
-    for i in range(0, len(beats_ms), 16):
-        start = beats_ms[i]
-        end = beats_ms[min(i + 16, len(beats_ms) - 1)]
-        stanzas.append((start, end))
 
     rms = _librosa.feature.rms(y=y_track)[0]
     energy_raw = [
@@ -566,6 +609,20 @@ def _analyze_buffer(
     ]
     max_e = max(energy_raw) if energy_raw else 1.0
     energy = [e / max_e if max_e > 0 else 0.0 for e in energy_raw]
+
+    # Correct a doubled tempo octave before deriving downbeats / stanzas, so
+    # everything downstream is built on the felt pulse. Skipped when the BPM
+    # is pinned (the caller asserted the tempo) — see _correct_tempo_octave.
+    if locked_bpm is None:
+        bpm, beats_ms, energy = _correct_tempo_octave(bpm, beats_ms, energy)
+
+    downbeats_ms = beats_ms[::4]
+
+    stanzas: list[tuple[int, int]] = []
+    for i in range(0, len(beats_ms), 16):
+        start = beats_ms[i]
+        end = beats_ms[min(i + 16, len(beats_ms) - 1)]
+        stanzas.append((start, end))
 
     return bpm, beats_ms, downbeats_ms, stanzas, energy
 
