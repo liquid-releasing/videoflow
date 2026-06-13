@@ -12,10 +12,13 @@ from videoflow.generate import (
     GenerateError,
     beats_to_curve,
     classify_modes,
+    density_arc_curve,
+    density_arc_from_levels,
     export_funscript,
     generate_from_beats,
     shape_curve,
 )
+from videoflow.generate import _arc_density
 
 
 # ---------------------------------------------------------------------------
@@ -637,6 +640,120 @@ class TestStrokeDensity(unittest.TestCase):
         bm = _beat_map(beats=[0, 500], energy=[1.0, 1.0])
         with self.assertRaises(ValueError):
             beats_to_curve(bm, stroke_density=3)
+
+
+# ---------------------------------------------------------------------------
+# Structural density arc — the narrative envelope (gold's dynamic-density
+# signature is an author-imposed arc, NOT audio loudness; corr ~0.17 measured
+# on Rhythms of Desire). The arc drives gate (decimate) + sub-stroke density.
+# ---------------------------------------------------------------------------
+
+class TestArcDensity(unittest.TestCase):
+
+    def test_below_arc_full_is_two(self):
+        # Sparse regions hold one stroke; sparseness comes from gating.
+        self.assertEqual(_arc_density(0.0), 2)
+        self.assertEqual(_arc_density(0.45), 2)
+
+    def test_climax_reaches_ceiling(self):
+        self.assertEqual(_arc_density(1.0, ceil=6), 6)
+
+    def test_count_is_always_even(self):
+        for a in (0.0, 0.3, 0.5, 0.7, 0.9, 1.0):
+            self.assertEqual(_arc_density(a) % 2, 0)
+
+    def test_monotonic_nondecreasing_in_arc(self):
+        vals = [_arc_density(a / 10) for a in range(11)]
+        self.assertEqual(vals, sorted(vals))
+
+
+class TestDensityArcCurve(unittest.TestCase):
+
+    def test_length_matches_positions(self):
+        pos = [i / 20 for i in range(21)]
+        self.assertEqual(len(density_arc_curve(pos)), len(pos))
+
+    def test_intro_builds_from_floor(self):
+        arc = density_arc_curve([0.0, 0.04, 0.08], build=0.08, floor=0.0, base=0.5)
+        self.assertAlmostEqual(arc[0], 0.0)        # starts at floor
+        self.assertLess(arc[1], arc[2])            # ramps up
+        self.assertAlmostEqual(arc[2], 0.5, places=2)  # reaches base
+
+    def test_body_is_flat_at_base(self):
+        arc = density_arc_curve([0.3, 0.4, 0.5], base=0.5)
+        self.assertTrue(all(abs(a - 0.5) < 1e-9 for a in arc))
+
+    def test_climax_bump_peaks_at_peak_at(self):
+        arc = density_arc_curve(
+            [0.85], base=0.5, peak=0.72, peak_at=0.85, climax_width=0.18,
+        )
+        self.assertAlmostEqual(arc[0], 0.72)       # peak at centre
+
+    def test_outro_tapers_to_floor(self):
+        arc = density_arc_curve([0.92, 0.96, 1.0], taper=0.12, floor=0.0, base=0.5)
+        self.assertGreater(arc[0], arc[2])         # descending
+        self.assertAlmostEqual(arc[2], 0.0, places=2)
+
+    def test_values_clamped_0_1(self):
+        arc = density_arc_curve([i / 50 for i in range(51)], peak=2.0, base=0.5)
+        self.assertTrue(all(0.0 <= a <= 1.0 for a in arc))
+
+
+class TestDensityArcFromLevels(unittest.TestCase):
+
+    def test_beats_inside_span_take_intensity(self):
+        arc = density_arc_from_levels(
+            [100, 600, 1100], [(0, 1000, 0.9)], default=0.3,
+        )
+        self.assertEqual(arc[0], 0.9)
+        self.assertEqual(arc[1], 0.9)
+        self.assertEqual(arc[2], 0.3)              # outside the span → default
+
+    def test_first_matching_span_wins(self):
+        arc = density_arc_from_levels(
+            [500], [(0, 1000, 0.2), (400, 800, 0.8)],
+        )
+        self.assertEqual(arc[0], 0.2)
+
+    def test_intensity_clamped(self):
+        arc = density_arc_from_levels([100], [(0, 1000, 5.0)])
+        self.assertEqual(arc[0], 1.0)
+
+
+class TestArcInBeatsToCurve(unittest.TestCase):
+    """The arc must (a) decimate beats where it's low and (b) subdivide where
+    it's high — exercised through beats_to_curve's fixed path."""
+
+    def _dense_bm(self, n=200):
+        beats = [i * 100 for i in range(n)]        # 10/s, plenty to decimate
+        return _beat_map(beats=beats, energy=[0.8] * n,
+                         stanzas=[(0, n * 100)], duration_ms=n * 100)
+
+    def test_zero_arc_drops_all_beats(self):
+        bm = self._dense_bm()
+        curve = beats_to_curve(bm, density_arc=[0.0] * len(bm.beats))
+        self.assertEqual(curve, [])
+
+    def test_low_arc_is_sparser_than_full_arc(self):
+        bm = self._dense_bm()
+        n = len(bm.beats)
+        sparse = beats_to_curve(bm, density_arc=[0.2] * n)
+        full = beats_to_curve(bm, density_arc=[1.0] * n)
+        self.assertLess(len(sparse), len(full))
+
+    def test_high_arc_subdivides_more_than_base(self):
+        bm = self._dense_bm()
+        n = len(bm.beats)
+        base = beats_to_curve(bm, density_arc=[0.5] * n)   # density 2, all fire
+        climax = beats_to_curve(bm, density_arc=[1.0] * n)  # density 6, all fire
+        self.assertGreater(len(climax), len(base) * 2)
+
+    def test_none_arc_matches_legacy_flat_path(self):
+        # Without an arc, the fixed path keeps its pre-arc behavior (gated,
+        # per-mode density) — no decimation by arc.
+        bm = self._dense_bm(40)
+        curve = beats_to_curve(bm, density_arc=None)
+        self.assertGreater(len(curve), 0)
 
 
 if __name__ == "__main__":

@@ -126,6 +126,108 @@ _MODE_DENSITY: dict[str, int] = {
 }
 
 
+#: Structural density arc — the narrative envelope that drives dynamic density.
+#:
+#: Measured (2026-06-13, Rhythms of Desire): a great hand-script's dynamic
+#: density is NOT a response to audio loudness — the music energy envelope
+#: correlates with the gold's per-window stroke rate at only ~0.17 (the outro
+#: is the proof: the EDM track stays loud while the gold goes silent). The
+#: gold's high rateCoV (~0.41) comes from a NARRATIVE ARC the author imposes:
+#: a sparse build-in, a sustained body, and a comedown taper at the end. The
+#: body itself is fairly steady (~0.16 CoV — like our flat output); the
+#: dynamics live in the intro ramp and the outro taper.
+#:
+#: So density is driven by a position/structure arc, not by energy. The arc
+#: value in [0,1] modulates BOTH the gate (low arc → drop beats → reach the
+#: sub-2/s intro and the 0/s outro) AND sub-stroke count (high arc → subdivide
+#: → reach the climax peak). Depth still never scales with the signal.
+_DENSITY_CEIL = 6        # peak sub-strokes per beat at the climax (arc = 1)
+_ARC_FULL = 0.45         # arc at/above which every beat fires; below, decimate
+
+
+def _arc_density(arc: float, *, ceil: int = _DENSITY_CEIL) -> int:
+    """Even sub-stroke count for a beat at arc level ``arc`` (0-1).
+
+    Holds at 2 (one full stroke) until the arc rises past ``_ARC_FULL``, then
+    ramps toward ``ceil`` at the climax. Below ``_ARC_FULL`` density stays at
+    2 and sparseness comes from gating (see :func:`_arc_fires`), not from
+    fractional strokes. Even keeps each beat's peak→trough self-contained.
+    """
+    if arc <= _ARC_FULL:
+        return 2
+    pairs = max(1, ceil // 2)
+    span = (arc - _ARC_FULL) / (1.0 - _ARC_FULL)
+    return 2 + 2 * int(round(min(1.0, span) * (pairs - 1)))
+
+
+def density_arc_curve(
+    positions: list[float],
+    *,
+    build: float = 0.08,
+    taper: float = 0.12,
+    base: float = 0.50,
+    peak: float = 0.72,
+    peak_at: float = 0.85,
+    climax_width: float = 0.18,
+    floor: float = 0.0,
+) -> list[float]:
+    """Default narrative arc as a function of normalised track position.
+
+    ``positions`` are each beat's position in ``[0, 1]`` (0 = track start).
+    Shape (matched to the gold's mechanism — a flat body with the dynamics in
+    the ends, not a long ramp):
+
+    - ``floor`` → ``base`` over the first ``build`` (the build-in),
+    - a flat body at ``base``,
+    - a localized climax bump to ``peak`` of width ``climax_width`` centred on
+      ``peak_at``,
+    - ``base`` → ``floor`` over the last ``taper`` (the comedown).
+
+    All knobs are user-exposable so the UI can offer a tunable default curve.
+    """
+    cw = max(0.0, climax_width) / 2.0
+    out: list[float] = []
+    for p in positions:
+        p = max(0.0, min(1.0, p))
+        if p < build:
+            a = floor + (base - floor) * (p / build if build > 0 else 1.0)
+        elif p > 1.0 - taper:
+            frac = (1.0 - p) / taper if taper > 0 else 0.0
+            a = floor + (base - floor) * frac
+        elif cw > 0 and peak_at - cw <= p <= peak_at + cw:
+            # Triangular climax bump centred on peak_at.
+            d = abs(p - peak_at) / cw
+            a = base + (peak - base) * (1.0 - d)
+        else:
+            a = base
+        out.append(max(0.0, min(1.0, a)))
+    return out
+
+
+def density_arc_from_levels(
+    beats_ms: list[int],
+    levels: list[tuple[int, int, float]],
+    *,
+    default: float = 0.55,
+) -> list[float]:
+    """Chapter/passage-driven arc: each ``(start_ms, end_ms, intensity)`` span
+    sets the arc level for the beats inside it (intensity in ``[0, 1]``).
+
+    Beats outside every span fall back to ``default``. This is the
+    author-driven path — the user selects spans and assigns intensity, the
+    same gesture as passages in FunscriptForge.
+    """
+    out: list[float] = []
+    for t in beats_ms:
+        a = default
+        for s, e, intensity in levels:
+            if s <= t < e:
+                a = max(0.0, min(1.0, intensity))
+                break
+        out.append(a)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Step 1 — Raw motion curve
 # ---------------------------------------------------------------------------
@@ -144,6 +246,8 @@ def beats_to_curve(
     depth_model: str = "fixed",
     gate: float = 0.10,
     modes: list[tuple[int, int, str]] | None = None,
+    density_arc: list[float] | None = None,
+    density_ceil: int = _DENSITY_CEIL,
 ) -> list[tuple[int, int]]:
     """Convert an :class:`~videoflow.audio.AudioBeatMap` into a raw motion curve.
 
@@ -285,19 +389,31 @@ def beats_to_curve(
             or center_trajectory is not None
             or tone_per_stanza is not None
         )
+        # Structural density arc — when supplied, the per-beat arc value owns
+        # firing AND density: low arc decimates beats (reaching the sub-2/s
+        # intro and the 0/s outro), high arc subdivides toward the climax. A
+        # deterministic fire accumulator keeps the kept-beat rate proportional
+        # to the arc without randomness. With no arc, fall back to the per-mode
+        # density constant and the flat energy gate (original behavior).
+        fire_acc = 0.0
         for i, beat_ms in enumerate(beats_list):
-            if norm_energies[i] < gate:
-                continue
             mode = _mode_at(beat_ms)
             depth = _MODE_DEPTH.get(mode, 1.0)
             half = 50.0 * depth
-            # Density lever: intense modes subdivide the beat into more
-            # strokes, calm modes fewer — this swings actions/sec across the
-            # track (the gold's dynamic-density signature). At least 2 (a
-            # complete peak→trough stroke) and at least the caller's
-            # stroke_density floor; mode adds density on top. Even, so
-            # alternation stays self-contained per beat (gating-safe).
-            n_pts = max(2, actions_per_beat, _MODE_DENSITY.get(mode, 2))
+            if density_arc is not None:
+                arc = density_arc[i] if i < len(density_arc) else 0.0
+                fire_frac = min(1.0, arc / _ARC_FULL) if _ARC_FULL > 0 else 1.0
+                fire_acc += fire_frac
+                if fire_acc < 1.0:
+                    continue          # decimated — this beat rests
+                fire_acc -= 1.0
+                base_density = _arc_density(arc, ceil=density_ceil)
+            else:
+                if norm_energies[i] < gate:
+                    continue
+                base_density = _MODE_DENSITY.get(mode, 2)
+            # Even count → each beat's peak→trough alternation is self-contained.
+            n_pts = max(2, actions_per_beat, base_density)
             beat_dur = _next_dur(i)
             for k in range(n_pts):
                 t = beat_ms + (k * beat_dur) // n_pts
@@ -645,6 +761,7 @@ def generate_from_beats(
     stroke_density: object = "half",
     depth_model: str = "fixed",
     gate: float = 0.10,
+    density_arc: "list[float] | str | None" = None,
     title: str = "",
     on_progress: "OnProgress | None" = None,
     progress_callback: "Callable[[str], None] | None" = None,
@@ -695,6 +812,19 @@ def generate_from_beats(
             modes = classify_modes(beat_map)
             reporter.complete(summary=f"{len(modes)} mode segments")
 
+        # Resolve the structural density arc. "default" builds the narrative
+        # curve (build-in / sustain / climax / taper-out) from each beat's
+        # normalised track position; a list is used verbatim; None disables
+        # the arc (flat density). See density_arc_curve / density_arc_from_levels.
+        arc = density_arc
+        if arc == "default" and beat_map.beats:
+            b0, b1 = beat_map.beats[0], beat_map.beats[-1]
+            span = (b1 - b0) or 1
+            positions = [(b - b0) / span for b in beat_map.beats]
+            arc = density_arc_curve(positions)
+        elif isinstance(arc, str):
+            arc = None  # unknown keyword → no arc
+
         with reporter.stage("curve"):
             _progress("Generating motion curve…")
             curve = beats_to_curve(
@@ -707,6 +837,7 @@ def generate_from_beats(
                 depth_model=depth_model,
                 gate=gate,
                 modes=modes,
+                density_arc=arc,
             )
             reporter.complete(summary=f"{len(curve)} curve points")
 
