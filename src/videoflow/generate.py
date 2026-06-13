@@ -108,6 +108,24 @@ _MODE_DEPTH: dict[str, float] = {
 }
 
 
+#: Fixed-depth model: sub-strokes per beat per mode (even, for self-contained
+#: peak→trough alternation). The DENSITY lever — intense modes subdivide the
+#: beat into more strokes, calm modes fewer, so actions/sec SWINGS across the
+#: track. Measured (2026-06-13): great scripts modulate density widely
+#: (Sinful rateCoV 0.46) while mediocre ones are monotone (CH 0.16); our
+#: fixed-density output was monotone (0.13) — this is the lever to fix that.
+#: Depth and density together = the depth↔rate coupling (fast = many small
+#: strokes; slow = few big ones).
+_MODE_DENSITY: dict[str, int] = {
+    "break":  2,  # sparse — a single slow stroke
+    "tease":  2,
+    "slow":   2,  # big, unhurried — few strokes
+    "steady": 2,  # the baseline
+    "fast":   4,  # busy — twice the strokes, smaller (see _MODE_DEPTH)
+    "edging": 6,  # densest — the climax builds
+}
+
+
 # ---------------------------------------------------------------------------
 # Step 1 — Raw motion curve
 # ---------------------------------------------------------------------------
@@ -267,15 +285,19 @@ def beats_to_curve(
             or center_trajectory is not None
             or tone_per_stanza is not None
         )
-        # At least 2 points per surviving beat so each beat is a complete
-        # stroke (peak→trough) — gating can drop neighbours without breaking
-        # cross-beat alternation.
-        n_pts = max(2, actions_per_beat)
         for i, beat_ms in enumerate(beats_list):
             if norm_energies[i] < gate:
                 continue
-            depth = _MODE_DEPTH.get(_mode_at(beat_ms), 1.0)
+            mode = _mode_at(beat_ms)
+            depth = _MODE_DEPTH.get(mode, 1.0)
             half = 50.0 * depth
+            # Density lever: intense modes subdivide the beat into more
+            # strokes, calm modes fewer — this swings actions/sec across the
+            # track (the gold's dynamic-density signature). At least 2 (a
+            # complete peak→trough stroke) and at least the caller's
+            # stroke_density floor; mode adds density on top. Even, so
+            # alternation stays self-contained per beat (gating-safe).
+            n_pts = max(2, actions_per_beat, _MODE_DENSITY.get(mode, 2))
             beat_dur = _next_dur(i)
             for k in range(n_pts):
                 t = beat_ms + (k * beat_dur) // n_pts
