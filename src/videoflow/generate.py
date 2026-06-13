@@ -970,6 +970,19 @@ def generate_from_beats_per_chapter(
 
         density = recipe.get("stroke_density", "half")
 
+        # Chapter-driven density arc — each chapter declares an intensity in
+        # [0, 1] (the passages gesture: the author says how hard each section
+        # drives). The cross-chapter intensity contour IS the narrative arc;
+        # low-intensity chapters decimate to a sparse rest, high-intensity
+        # ones subdivide toward a climax. Absent → flat density (back-compat).
+        intensity = recipe.get("intensity")
+        chapter_arc = (
+            density_arc_from_levels(
+                sliced.beats, [(start_ms, end_ms, float(intensity))],
+            )
+            if intensity is not None else None
+        )
+
         modes = classify_modes(sliced)
         curve = beats_to_curve(
             sliced,
@@ -980,6 +993,7 @@ def generate_from_beats_per_chapter(
             depth_model=depth_model,
             gate=gate,
             modes=modes,
+            density_arc=chapter_arc,
         )
         if depth_model == "fixed":
             shaped = curve  # fixed-depth folds shaping in

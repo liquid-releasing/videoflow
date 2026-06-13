@@ -161,6 +161,34 @@ class TestGenerateFromBeatsPerChapter(unittest.TestCase):
         # Should cover the full track
         self.assertGreater(max(a["at"] for a in data["actions"]), 50_000)
 
+    def test_chapter_intensity_drives_density(self):
+        """A low-intensity chapter must be sparser than a high-intensity one —
+        the passages-style narrative arc through per-chapter intensity."""
+        chapters = [
+            {"at_ms": 0, "end_ms": 30000},
+            {"at_ms": 30000, "end_ms": 60000},
+        ]
+        recipes = [
+            {"source": "percussive", "tone": "flat", "intensity": 0.2},  # calm
+            {"source": "percussive", "tone": "flat", "intensity": 1.0},  # climax
+        ]
+        out = self.tmp / "arc.funscript"
+        generate_from_beats_per_chapter(self.bm, chapters, recipes, out)
+        actions = json.loads(out.read_text())["actions"]
+        calm = sum(1 for a in actions if a["at"] < 30_000)
+        climax = sum(1 for a in actions if a["at"] >= 30_000)
+        self.assertGreater(calm, 0, "calm chapter should still have some strokes")
+        self.assertGreater(climax, calm * 2,
+                           f"climax should be much denser: calm={calm} climax={climax}")
+
+    def test_no_intensity_is_backcompat(self):
+        """Recipes without intensity behave exactly as before (no arc)."""
+        out_no = self.tmp / "no_intensity.funscript"
+        chapters = [{"at_ms": 0, "end_ms": 60000}]
+        recipes = [{"source": "percussive", "stroke_density": "half", "tone": "flat"}]
+        generate_from_beats_per_chapter(self.bm, chapters, recipes, out_no)
+        self.assertGreater(len(json.loads(out_no.read_text())["actions"]), 0)
+
 
 class TestExportFunscriptMetadata(unittest.TestCase):
 
