@@ -147,15 +147,33 @@ class TestClassifyModes(unittest.TestCase):
         modes = classify_modes(bm)
         self.assertEqual(modes[0][2], "edging")
 
-    def test_fast_on_high_bpm(self):
-        bm = _beat_map(bpm=150.0)
+    def test_fast_on_locally_dense_stanza(self):
+        # fast/slow are per-stanza density RELATIVE to the track median, not
+        # a global bpm (which collapses the whole track to one mode and is
+        # fragile to octave-doubling misdetects). A stanza much denser than
+        # the rest reads fast.
+        beats = (list(range(0, 2000, 500))         # stanza 0: 4 beats  (2/s)
+                 + list(range(2000, 4000, 500))    # stanza 1: 4 beats  (2/s)
+                 + list(range(4000, 6000, 150)))   # stanza 2: ~13 beats (~6/s)
+        energy = [0.7] * len(beats)
+        bm = _beat_map(
+            bpm=120.0, beats=beats, energy=energy,
+            stanzas=[(0, 2000), (2000, 4000), (4000, 6000)], duration_ms=6000,
+        )
         modes = classify_modes(bm)
-        self.assertEqual(modes[0][2], "fast")
+        self.assertEqual(modes[2][2], "fast")
 
-    def test_slow_on_low_bpm(self):
-        bm = _beat_map(bpm=60.0)
+    def test_slow_on_locally_sparse_stanza(self):
+        beats = (list(range(0, 2000, 150))         # stanza 0: ~13 beats (~6/s)
+                 + list(range(2000, 4000, 500))    # stanza 1: 4 beats  (2/s)
+                 + [4000, 5500])                    # stanza 2: 2 beats  (1/s)
+        energy = [0.7] * len(beats)
+        bm = _beat_map(
+            bpm=120.0, beats=beats, energy=energy,
+            stanzas=[(0, 2000), (2000, 4000), (4000, 6000)], duration_ms=6000,
+        )
         modes = classify_modes(bm)
-        self.assertEqual(modes[0][2], "slow")
+        self.assertEqual(modes[2][2], "slow")
 
     def test_steady_on_normal_energy_and_bpm(self):
         beats = list(range(0, 4000, 500))
@@ -260,8 +278,10 @@ class TestClassifyModesPerChapter(unittest.TestCase):
             beats=beats, energy=energy,
             stanzas=[(0, 30000)], duration_ms=30000,
         )
-        # Whole-file: BPM 200 → fast
-        self.assertEqual(classify_modes(bm)[0][2], "fast")
+        # Whole-file: ignores global bpm entirely now (fast/slow are
+        # per-stanza density relative to the track). A single uniform-density
+        # stanza is its own baseline → steady, NOT fast.
+        self.assertEqual(classify_modes(bm)[0][2], "steady")
         # Chapter-aware: chunk BPM is 120 → steady (not fast)
         modes = classify_modes(bm, chapters=[Chapter(at_ms=0, end_ms=30000)])
         self.assertEqual(modes[0][2], "steady")
@@ -491,9 +511,15 @@ class TestGenerateFromBeats(unittest.TestCase):
         times = [a["at"] for a in data["actions"]]
         self.assertEqual(times, sorted(times))
 
-    def test_high_bpm_mode_is_fast(self):
-        beats = list(range(0, 4000, 400))
-        bm = _beat_map(bpm=150.0, beats=beats, energy=[0.8] * len(beats))
+    def test_locally_dense_stanza_mode_is_fast(self):
+        # fast = a stanza denser than the track median (not a global bpm).
+        beats = (list(range(0, 2000, 500))         # sparse
+                 + list(range(2000, 4000, 500))    # sparse
+                 + list(range(4000, 6000, 150)))   # dense → fast
+        bm = _beat_map(
+            bpm=120.0, beats=beats, energy=[0.8] * len(beats),
+            stanzas=[(0, 2000), (2000, 4000), (4000, 6000)], duration_ms=6000,
+        )
         modes = classify_modes(bm)
         self.assertTrue(any(m == "fast" for _, _, m in modes))
 

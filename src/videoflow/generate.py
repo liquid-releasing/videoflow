@@ -98,11 +98,12 @@ _MODE_DEPTH: dict[str, float] = {
     "tease":  0.72,  # restrained, partial — quiet-section middle texture
     "slow":   0.95,  # big, unhurried strokes — low rate, near-full depth
     "steady": 1.00,  # full rails
-    "fast":   0.72,  # DEPTH<->RATE COUPLING: busy sections = smaller strokes.
+    "fast":   0.50,  # DEPTH<->RATE COUPLING: busy sections = smaller strokes.
                      # Measured on Sinful gold (2026-06-13): at ~9 strokes/s
                      # avg stroke ~52/100, not rail-to-rail — you physically
                      # can't slam full strokes at speed. NOT softness (tease);
-                     # it's the rate coupling. The other source of mid%.
+                     # it's the rate coupling. Lands in the mid deciles (the
+                     # gold's middle texture), distinct from tease's limbo.
     "edging": 1.00,  # full rails — the climax
 }
 

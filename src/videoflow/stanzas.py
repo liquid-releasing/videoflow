@@ -264,25 +264,46 @@ def _classify_modes_whole(
     break_thr = max(_percentile(all_e, 0.15), 0.08)
     tease_thr = _percentile(all_e, 0.40)
 
+    # First pass: per-stanza energy + LOCAL beat density. fast/slow are
+    # decided by per-stanza density RELATIVE to the track median, NOT a
+    # single global bpm. A global bpm collapses the whole track to one mode
+    # (and is fragile to octave-doubling errors — a 215 bpm misdetect made
+    # every stanza "fast"); per-stanza relative density both fixes that and
+    # reproduces the gold's real behaviour, where density varies through the
+    # piece (dense=fast=smaller strokes, sparse=slow=big strokes).
+    stats: list[tuple[int, int, list[int], float, float, float, float]] = []
     for start_ms, end_ms in beat_map.stanzas:
         indices = [
             i for i, b in enumerate(beat_map.beats)
             if start_ms <= b < end_ms
         ]
+        dur_s = max(1e-6, (end_ms - start_ms) / 1000.0)
+        density = len(indices) / dur_s
+        if indices:
+            se = [beat_map.energy[i] for i in indices]
+            avg = sum(se) / len(se)
+            trend, second_avg = _energy_trend(se)
+        else:
+            avg = trend = second_avg = 0.0
+        stats.append((start_ms, end_ms, indices, avg, trend, second_avg, density))
+
+    dens_sorted = sorted(s[6] for s in stats if s[2])
+    median_density = _percentile(dens_sorted, 0.50)
+    fast_thr = median_density * 1.25
+    slow_thr = median_density * 0.75
+
+    for start_ms, end_ms, indices, avg, trend, second_avg, density in stats:
         if not indices:
             modes.append((start_ms, end_ms, "break"))
             continue
-        stanza_energy = [beat_map.energy[i] for i in indices]
-        avg = sum(stanza_energy) / len(stanza_energy)
-        trend, second_avg = _energy_trend(stanza_energy)
 
         if avg < break_thr:
             mode = "break"
         elif trend >= 0.15 and second_avg >= track_median:
             mode = "edging"
-        elif beat_map.bpm >= 140:
+        elif median_density > 0 and density >= fast_thr:
             mode = "fast"
-        elif beat_map.bpm <= 75:
+        elif median_density > 0 and density <= slow_thr:
             mode = "slow"
         elif avg < tease_thr:
             mode = "tease"
