@@ -438,6 +438,9 @@ def cmd_generate_funscript(args: argparse.Namespace) -> int:
                 tone_per_stanza=auto_tone,
                 energy_normalize=args.energy_normalize,
                 stroke_density=args.stroke_density,
+                density_arc=(
+                    None if args.density_arc == "none" else args.density_arc
+                ),
                 title=args.title or "",
                 progress_callback=_emit_progress,
             )
@@ -904,8 +907,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["flat", "rise", "fall", "auto"],
         default="flat",
         help="Whole-shape gestalt for the curve. flat (default): constant "
-             "center 50. rise: center drifts 30→70 over the track. fall: "
-             "70→30. auto: per-stanza center swing derived from each "
+             "center 50. rise: center drifts 30->70 over the track. fall: "
+             "70->30. auto: per-stanza center swing derived from each "
              "stanza's energy slope — rising stanzas climb, falling ones "
              "relax. Works on drones too (energy moves even without melody).",
     )
@@ -913,6 +916,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--center-trajectory", default=None, metavar="START,END",
         help="Custom center trajectory as 'start,end' (each 0–100). E.g. "
              "'40,80' rises from 40 to 80. Overrides --tone if both given.",
+    )
+    p_gen.add_argument(
+        "--density-arc",
+        choices=["default", "none"],
+        default="default",
+        help="Narrative density arc over the whole track. default (default): "
+             "a build-in / flat body / late climax bump / comedown-taper shape "
+             "drives stroke density (sparse intro & outro, fuller climax) — the "
+             "dynamic-density signature of a great hand-made script. none: flat "
+             "density (every section equally busy). The arc is a structural "
+             "shape, not an audio-loudness response.",
     )
     p_gen.add_argument(
         "--title", default="", metavar="TEXT",
@@ -1092,3 +1106,7 @@ def main() -> None:
                 pass
         raise
     sys.exit(rc)
+
+
+if __name__ == "__main__":  # `python -m videoflow.cli …`
+    main()
