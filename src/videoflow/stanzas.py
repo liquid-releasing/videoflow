@@ -232,13 +232,38 @@ def classify_stanzas(
     ]
 
 
+def _percentile(sorted_vals: list[float], q: float) -> float:
+    """Nearest-rank percentile of an already-sorted list (q in [0,1])."""
+    if not sorted_vals:
+        return 0.0
+    idx = min(len(sorted_vals) - 1, int(len(sorted_vals) * q))
+    return sorted_vals[idx]
+
+
 def _classify_modes_whole(
     beat_map: "AudioBeatMap",
 ) -> list[tuple[int, int, str]]:
-    """Original whole-file classification — kept for back-compat with the
-    v0.0.4 API and used for short-file analysis where chapter awareness
-    adds no value."""
+    """Whole-file classification — TRACK-RELATIVE thresholds.
+
+    Each stanza is classified against the track's OWN energy distribution
+    (percentiles), not absolute 0.15/0.30 cuts. Real beat energies cluster
+    low in absolute terms, so the old absolute cuts mislabelled ~85 % of a
+    normal track as break/tease (the centered-bell cause). Relative
+    thresholds mean break/tease are the genuinely-quiet minority and the
+    bulk of a track is steady — which is what reaches the rails under the
+    fixed-depth generator. Mirrors the per-chapter regime, applied
+    track-wide. See forgegen/architecture/GENERATION_DEPTH_LAW.md.
+    """
     modes: list[tuple[int, int, str]] = []
+    all_e = sorted(beat_map.energy) if beat_map.energy else []
+    track_median = _percentile(all_e, 0.50)
+    # break = bottom ~15 % (with an absolute silence floor so a uniformly
+    # near-silent track still detects break); tease = bottom ~40 %. Stanza
+    # averaging narrows the spread, so fewer stanzas than the raw beat
+    # percentile actually fall below these — keeping break/tease a minority.
+    break_thr = max(_percentile(all_e, 0.15), 0.08)
+    tease_thr = _percentile(all_e, 0.40)
+
     for start_ms, end_ms in beat_map.stanzas:
         indices = [
             i for i, b in enumerate(beat_map.beats)
@@ -249,18 +274,18 @@ def _classify_modes_whole(
             continue
         stanza_energy = [beat_map.energy[i] for i in indices]
         avg = sum(stanza_energy) / len(stanza_energy)
-        trend, _ = _energy_trend(stanza_energy)
+        trend, second_avg = _energy_trend(stanza_energy)
 
-        if avg < 0.15:
+        if avg < break_thr:
             mode = "break"
-        elif avg < 0.30:
-            mode = "tease"
-        elif trend >= 0.15 and avg >= 0.35:
+        elif trend >= 0.15 and second_avg >= track_median:
             mode = "edging"
         elif beat_map.bpm >= 140:
             mode = "fast"
         elif beat_map.bpm <= 75:
             mode = "slow"
+        elif avg < tease_thr:
+            mode = "tease"
         else:
             mode = "steady"
         modes.append((start_ms, end_ms, mode))

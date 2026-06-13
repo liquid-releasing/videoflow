@@ -122,12 +122,22 @@ class TestClassifyModes(unittest.TestCase):
         modes = classify_modes(bm)
         self.assertEqual(modes[0][2], "break")
 
-    def test_tease_on_quiet_stanza(self):
-        beats = [0, 500, 1000, 1500]
-        energy = [0.20, 0.22, 0.18, 0.25]
-        bm = _beat_map(beats=beats, energy=energy, stanzas=[(0, 2000)])
+    def test_tease_and_break_are_relative_to_track(self):
+        # Track-RELATIVE semantics: a stanza is tease when quiet *relative
+        # to the rest of the track*, and break when quiet relative to that.
+        # (A uniformly-quiet track is its own baseline -> steady; the old
+        # absolute 0.30 cut mislabelled ~85% of normal tracks as tease.)
+        beats = list(range(0, 10000, 500))  # 20 beats, 5 stanzas of 4
+        energy = ([0.8] * 12        # three loud stanzas  -> steady
+                  + [0.5] * 4       # one softer stanza   -> tease (relative)
+                  + [0.05] * 4)     # one near-silent     -> break
+        stanzas = [(0, 2000), (2000, 4000), (4000, 6000),
+                   (6000, 8000), (8000, 10000)]
+        bm = _beat_map(beats=beats, energy=energy, stanzas=stanzas)
         modes = classify_modes(bm)
-        self.assertEqual(modes[0][2], "tease")
+        self.assertEqual(modes[0][2], "steady")  # loud
+        self.assertEqual(modes[3][2], "tease")   # quiet *for this track*
+        self.assertEqual(modes[4][2], "break")   # near-silent
 
     def test_edging_on_rising_energy(self):
         # Second half energy much higher than first half
@@ -179,22 +189,25 @@ class TestClassifyModesPerChapter(unittest.TestCase):
     relative to its chapter's distribution.
     """
 
-    def test_ambient_stanza_gets_steady_when_chunk_is_uniformly_quiet(self):
-        """The whole-file regime would map this to break/tease. Chunk-aware
-        sees the stanza is at the chunk's median, so it's "average" → steady.
+    def test_ambient_stanza_gets_steady_when_uniformly_quiet(self):
+        """A uniformly-quiet track is its own baseline → steady, NOT tease.
+
+        Both regimes are now track/chunk-RELATIVE (the whole-file path was
+        fixed to use percentile thresholds, not absolute 0.30 cuts that
+        mislabelled ~85% of normal tracks as tease). So a uniform-energy
+        track reads steady under both. The regimes still diverge on MIXED
+        multi-chapter tracks, where per-chapter references differ from the
+        whole-track reference.
         """
         from videoflow.chapters import Chapter
         beats = list(range(0, 8000, 500))
-        # All stanzas at uniform low energy 0.2 — whole-file would say tease;
-        # chunk-aware says everyone is at the median → steady (BPM=120, not
-        # fast or slow).
-        energy = [0.2] * len(beats)
+        energy = [0.2] * len(beats)  # uniform → baseline → steady (BPM 120)
         bm = _beat_map(
             bpm=120.0, beats=beats, energy=energy,
             stanzas=[(0, 4000), (4000, 8000)], duration_ms=8000,
         )
         whole = classify_modes(bm)
-        self.assertEqual([m[2] for m in whole], ["tease", "tease"])
+        self.assertEqual([m[2] for m in whole], ["steady", "steady"])
 
         chapter_aware = classify_modes(
             bm, chapters=[Chapter(at_ms=0, end_ms=8000)],

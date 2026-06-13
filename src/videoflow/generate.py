@@ -95,11 +95,15 @@ _VALID_MODES = frozenset(_MODE_HIGH_SCALE)
 #: never amplitude. break/tease are the only deliberately-shallow modes.
 _MODE_DEPTH: dict[str, float] = {
     "break":  0.55,  # softened but still moving (not a near-still bell)
-    "tease":  0.72,  # restrained, partial — the bulk of the middle texture
-    "slow":   0.90,  # nearly full, unhurried
+    "tease":  0.72,  # restrained, partial — quiet-section middle texture
+    "slow":   0.95,  # big, unhurried strokes — low rate, near-full depth
     "steady": 1.00,  # full rails
-    "fast":   1.00,  # full rails
-    "edging": 1.00,  # full rails
+    "fast":   0.72,  # DEPTH<->RATE COUPLING: busy sections = smaller strokes.
+                     # Measured on Sinful gold (2026-06-13): at ~9 strokes/s
+                     # avg stroke ~52/100, not rail-to-rail — you physically
+                     # can't slam full strokes at speed. NOT softness (tease);
+                     # it's the rate coupling. The other source of mid%.
+    "edging": 1.00,  # full rails — the climax
 }
 
 
