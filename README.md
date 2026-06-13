@@ -146,6 +146,23 @@ pytest tests/
 
 ---
 
+## Acknowledgements
+
+- **[Funscript-Flow](https://github.com/Funscript-Flow/Funscript-Flow)**
+  (Apache-2.0) — the computer-vision video→funscript generator whose
+  optical-flow output independently **confirmed the depth law** this engine
+  implements: mapping any signal (audio energy *or* video flow magnitude) to
+  stroke *depth* yields a centered bell, while a fixed full-depth backbone with
+  the signal driving only timing/density yields the bimodal, rail-to-rail shape
+  of a great script. That two-modality agreement is why we treat it as a law,
+  not a heuristic. Funscript-Flow is also the intended external video timing
+  source for the downstream [forgegen](https://github.com/liquid-releasing/forgegen)
+  pipeline. We also adopted its rolling local min/max normalisation idea for
+  forcing rails on signals of unreliable scale. Thanks to its authors.
+
+---
+
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). The acknowledged project above is independent and
+distributed under its own license.
