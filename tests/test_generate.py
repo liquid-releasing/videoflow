@@ -97,6 +97,65 @@ class TestGainArc(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# texture — bounded amplitude variation (the "alive, not a wall" lever)
+# ---------------------------------------------------------------------------
+
+class TestTexture(unittest.TestCase):
+    """Bounded amplitude texture: pulls QUIET beats inward by at most
+    `texture` while leaving the loudest at the rails, so a flat block of
+    identical heights gains the mid shoulder gold carries — WITHOUT the
+    refuted global energy->depth law (the reduction is capped and only ever
+    shrinks). Measured envelope (2026-06-14): texture<=~0.3 keeps the decile
+    shape bimodal; >=0.4 collapses the rails into a centre bell."""
+
+    @staticmethod
+    def _ramp_bm():
+        # Monotonic energy ramp so the contrast-stretch maps quiet->0, loud->1.
+        beats = list(range(0, 8000, 500))  # 16 beats
+        # Floor above the density gate (0.10) so the quietest beat still fires.
+        energy = [0.25 + 0.75 * i / (len(beats) - 1) for i in range(len(beats))]
+        return _beat_map(beats=beats, energy=energy)
+
+    def _max_dev_at(self, curve, beat_ms, next_ms):
+        return max((abs(p - 50) for t, p in curve if beat_ms <= t < next_ms),
+                   default=0)
+
+    def test_texture_zero_is_identity(self):
+        bm = self._ramp_bm()
+        self.assertEqual(beats_to_curve(bm), beats_to_curve(bm, texture=0.0))
+
+    def test_texture_leaves_the_loudest_beat_at_the_rails(self):
+        bm = self._ramp_bm()
+        base = beats_to_curve(bm)
+        tex = beats_to_curve(bm, texture=0.4)
+        # last beat = max energy = texture_signal 1.0 -> untouched
+        last, prev = bm.beats[-1], bm.beats[-2]
+        self.assertEqual(self._max_dev_at(tex, last, last + 500),
+                         self._max_dev_at(base, last, last + 500))
+
+    def test_texture_pulls_the_quietest_beat_inward(self):
+        bm = self._ramp_bm()
+        base = beats_to_curve(bm)
+        tex = beats_to_curve(bm, texture=0.4)
+        b0, b1 = bm.beats[0], bm.beats[1]
+        self.assertLess(self._max_dev_at(tex, b0, b1),
+                        self._max_dev_at(base, b0, b1))
+
+    def test_texture_reduction_is_bounded_by_amount(self):
+        bm = self._ramp_bm()
+        base = beats_to_curve(bm)
+        tex = beats_to_curve(bm, texture=0.4)
+        # no stroke shrinks by more than `texture` of its full reach
+        for (tb, pb), (tt, pt) in zip(base, tex):
+            self.assertGreaterEqual(abs(pt - 50), abs(pb - 50) * 0.6 - 1e-9)
+
+    def test_texture_keeps_positions_in_range(self):
+        bm = self._ramp_bm()
+        curve = beats_to_curve(bm, texture=0.5)
+        self.assertTrue(all(0 <= p <= 100 for _, p in curve))
+
+
+# ---------------------------------------------------------------------------
 # beats_to_curve
 # ---------------------------------------------------------------------------
 

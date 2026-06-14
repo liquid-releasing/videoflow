@@ -249,6 +249,7 @@ def beats_to_curve(
     density_arc: list[float] | None = None,
     density_ceil: int = _DENSITY_CEIL,
     gain_arc: list[float] | None = None,
+    texture: float = 0.0,
 ) -> list[tuple[int, int]]:
     """Convert an :class:`~videoflow.audio.AudioBeatMap` into a raw motion curve.
 
@@ -371,6 +372,23 @@ def beats_to_curve(
 
     curve: list[tuple[int, int]] = []
 
+    # Texture signal — a CONTRAST-STRETCHED copy of the per-beat energy.
+    # Raw RMS often compresses into a narrow band (VO ch8: p25-p95 = 0.55-0.73),
+    # so absolute energy barely varies and texture can't bite. Stretching the
+    # [p10, p90] window to [0, 1] recovers the RELATIVE loud/quiet contrast:
+    # the section's quietest beats map → 0 (pulled inward by `texture`), its
+    # loudest → 1 (stay at the rails). A genuinely loud-everywhere section still
+    # maps high → rails preserved; only WITHIN-track contrast creates the mid
+    # shoulder. Computed once; only used when texture > 0.
+    if texture > 0.0 and norm_energies:
+        _se = sorted(norm_energies)
+        _lo = _se[int(len(_se) * 0.10)]
+        _hi = _se[min(len(_se) - 1, int(len(_se) * 0.90))]
+        _span = (_hi - _lo) or 1.0
+        texture_signal = [max(0.0, min(1.0, (e - _lo) / _span)) for e in norm_energies]
+    else:
+        texture_signal = norm_energies
+
     # ---- Fixed-depth model (default) — the bimodal backbone --------------
     # Each surviving (gated) beat emits a self-contained full stroke toward
     # the rails. Energy gates *which* beats fire (density); modes set partial
@@ -422,6 +440,20 @@ def beats_to_curve(
             # author declares the reach arc, exactly like the Pace/density arc.
             if gain_arc is not None and i < len(gain_arc):
                 half *= max(0.0, min(1.0, gain_arc[i]))
+            # Bounded amplitude TEXTURE (the "alive, not a wall" lever).
+            # Without it every gated beat in a section strokes to the SAME
+            # depth → a flat block of identical heights (dogfood: "heights too
+            # consistent to be interesting"). Gold scripts carry ~10-25% of
+            # strokes off the hard rails as a mid shoulder. Here the
+            # per-beat (per-chunk-normalised) energy pulls quieter beats IN
+            # toward the centre by AT MOST `texture`: the loudest beats keep
+            # full mode depth (rails preserved), quiet ones land in the mid.
+            # This is NOT the refuted global energy→depth law — the reduction
+            # is CAPPED at `texture` and only ever shrinks, so the bimodal
+            # rails backbone survives; `texture` just sets how much mid
+            # shoulder appears. texture=0 → fixed law unchanged.
+            if texture > 0.0 and i < len(texture_signal):
+                half *= 1.0 - texture * (1.0 - texture_signal[i])
             # Even count → each beat's peak→trough alternation is self-contained.
             n_pts = max(2, actions_per_beat, base_density)
             beat_dur = _next_dur(i)
@@ -773,6 +805,7 @@ def generate_from_beats(
     gate: float = 0.10,
     density_arc: "list[float] | str | None" = None,
     gain_arc: "list[float] | None" = None,
+    texture: float = 0.0,
     title: str = "",
     on_progress: "OnProgress | None" = None,
     progress_callback: "Callable[[str], None] | None" = None,
@@ -850,6 +883,7 @@ def generate_from_beats(
                 modes=modes,
                 density_arc=arc,
                 gain_arc=gain_arc,
+                texture=texture,
             )
             reporter.complete(summary=f"{len(curve)} curve points")
 
