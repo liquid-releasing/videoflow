@@ -150,6 +150,47 @@ def motion_stats(pairs: list[tuple[int, int]]) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Speed distribution — the movement-speed histogram (F.A.P.S-style)
+# ---------------------------------------------------------------------------
+
+#: Movement-speed bins in position-units/sec (|Δpos| per second between
+#: adjacent actions — the same unit :func:`velocities` returns). Seven named
+#: bands from "barely moving" to "flash", matching the speed-distribution
+#: readout users already know from F.A.P.S / heatmap tools. Six edges → seven
+#: bins. Tunable; the names travel with the values so any UI can label them.
+SPEED_BINS: tuple[str, ...] = (
+    "very_slow", "slow", "medium", "fast", "very_fast", "ultra_fast", "flash",
+)
+SPEED_EDGES: tuple[int, ...] = (50, 150, 250, 350, 450, 600)
+
+
+def speed_distribution(pairs: list[tuple[int, int]]) -> dict:
+    """Histogram of per-action movement speed into the :data:`SPEED_BINS`.
+
+    The speed counterpart to :func:`position_stats`' decile histogram: where
+    decile shape answers "how far do strokes reach", this answers "how fast do
+    they move". A great script spreads across the bands; a monotone one piles
+    into one. Returns counts + percentages per named band so a UI can render
+    the familiar Very-Slow…Flash bar without re-deriving the bins."""
+    vels = [v for _, v in velocities(pairs)]
+    n = len(vels)
+    counts = [0] * len(SPEED_BINS)
+    for v in vels:
+        b = 0
+        while b < len(SPEED_EDGES) and v >= SPEED_EDGES[b]:
+            b += 1
+        counts[b] += 1
+    pct = [round(c * 100.0 / n, 1) if n else 0.0 for c in counts]
+    return {
+        "bins": list(SPEED_BINS),
+        "edges": list(SPEED_EDGES),
+        "counts": counts,
+        "pct": pct,
+        "n": n,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Windowed profile — the temporal envelope (modes / phrases / arc live here)
 # ---------------------------------------------------------------------------
 
@@ -234,6 +275,7 @@ def summarize(actions: Iterable, *, n_windows: int = 12) -> dict:
     return {
         "position": position_stats(pairs),
         "motion": motion_stats(pairs),
+        "speed": speed_distribution(pairs),
         "profile": profile,
         "dynamics": dynamics_index(profile),
     }

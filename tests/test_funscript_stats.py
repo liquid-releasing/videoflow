@@ -5,10 +5,12 @@ from __future__ import annotations
 import unittest
 
 from videoflow.funscript_stats import (
+    SPEED_BINS,
     decile_histogram,
     dynamics_index,
     motion_stats,
     position_stats,
+    speed_distribution,
     summarize,
     to_pairs,
     velocities,
@@ -24,6 +26,34 @@ def _bimodal(n=100, period_ms=500):
 def _bell(n=100, period_ms=500):
     """Centered strokes that never reach the rails: alternating 40 / 60."""
     return [{"at": i * period_ms, "pos": 40 if i % 2 else 60} for i in range(n)]
+
+
+class TestSpeedDistribution(unittest.TestCase):
+
+    def test_bins_sum_to_action_count(self):
+        sd = speed_distribution(to_pairs(_bimodal(n=100)))
+        self.assertEqual(sum(sd["counts"]), sd["n"])
+        self.assertEqual(len(sd["bins"]), len(SPEED_BINS))
+        self.assertAlmostEqual(sum(sd["pct"]), 100.0, delta=0.5)
+
+    def test_slow_strokes_land_in_low_bands(self):
+        # tiny 40<->60 strokes over 500ms => ~40 units/sec => very_slow
+        sd = speed_distribution(to_pairs(_bell(n=50, period_ms=500)))
+        idx = sd["bins"].index("very_slow")
+        self.assertGreater(sd["pct"][idx], 90.0)
+
+    def test_fast_strokes_land_in_high_bands(self):
+        # rail-to-rail (100 units) over 100ms => ~1000 units/sec => flash
+        sd = speed_distribution(to_pairs(_bimodal(n=50, period_ms=100)))
+        self.assertGreater(sd["pct"][sd["bins"].index("flash")], 90.0)
+
+    def test_empty_is_safe(self):
+        sd = speed_distribution([])
+        self.assertEqual(sd["n"], 0)
+        self.assertEqual(sum(sd["counts"]), 0)
+
+    def test_present_in_summarize(self):
+        self.assertIn("speed", summarize(_bimodal(n=20)))
 
 
 class TestToPairs(unittest.TestCase):
