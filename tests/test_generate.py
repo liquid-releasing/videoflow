@@ -50,6 +50,53 @@ def _beat_map(
 
 
 # ---------------------------------------------------------------------------
+# gain_arc — the Range amplitude-gain arc (per-position depth multiplier)
+# ---------------------------------------------------------------------------
+
+class TestGainArc(unittest.TestCase):
+    """The Range arc scales the FIXED mode depth per beat — gain=1 keeps the
+    rails (bimodal preserved), gain<1 pulls the reach toward centre (the
+    mid-decile texture). Depth is still never signal-scaled; the author
+    declares the reach arc the same way the Pace/density arc is declared."""
+
+    def test_gain_none_is_unchanged(self):
+        bm = _beat_map()
+        self.assertEqual(beats_to_curve(bm), beats_to_curve(bm, gain_arc=None))
+
+    def test_gain_full_keeps_the_rails(self):
+        bm = _beat_map()
+        curve = beats_to_curve(bm, gain_arc=[1.0] * len(bm.beats))
+        positions = {p for _, p in curve}
+        self.assertIn(100, positions)  # steady full depth around centre 50
+        self.assertIn(0, positions)
+
+    def test_gain_half_shrinks_the_reach(self):
+        bm = _beat_map()
+        n = len(bm.beats)
+        full = beats_to_curve(bm, gain_arc=[1.0] * n)
+        half = beats_to_curve(bm, gain_arc=[0.5] * n)
+        amp_full = max(p for _, p in full) - min(p for _, p in full)
+        amp_half = max(p for _, p in half) - min(p for _, p in half)
+        self.assertLess(amp_half, amp_full)
+        self.assertEqual(max(p for _, p in half), 75)  # 50 + 50*0.5
+
+    def test_rising_gain_reaches_further_late(self):
+        bm = _beat_map()
+        n = len(bm.beats)
+        curve = beats_to_curve(bm, gain_arc=[i / (n - 1) for i in range(n)])
+        early_dev = max(abs(p - 50) for t, p in curve if t <= bm.beats[1])
+        late_dev = max(abs(p - 50) for t, p in curve if t >= bm.beats[-2])
+        self.assertGreater(late_dev, early_dev)
+
+    def test_gain_clamped_into_unit_range(self):
+        bm = _beat_map()
+        n = len(bm.beats)
+        # values outside [0,1] must not push positions past the rails
+        curve = beats_to_curve(bm, gain_arc=[1.5] * n)
+        self.assertTrue(all(0 <= p <= 100 for _, p in curve))
+
+
+# ---------------------------------------------------------------------------
 # beats_to_curve
 # ---------------------------------------------------------------------------
 

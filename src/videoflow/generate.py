@@ -248,6 +248,7 @@ def beats_to_curve(
     modes: list[tuple[int, int, str]] | None = None,
     density_arc: list[float] | None = None,
     density_ceil: int = _DENSITY_CEIL,
+    gain_arc: list[float] | None = None,
 ) -> list[tuple[int, int]]:
     """Convert an :class:`~videoflow.audio.AudioBeatMap` into a raw motion curve.
 
@@ -412,6 +413,15 @@ def beats_to_curve(
                 if norm_energies[i] < gate:
                     continue
                 base_density = _MODE_DENSITY.get(mode, 2)
+            # Per-position amplitude GAIN (the Range arc): a [0,1] multiplier
+            # on the fixed mode depth. gain=1 → full mode depth (rails for
+            # steady → bimodal preserved); gain<1 → a shallower reach that
+            # lands in the mid deciles (the gold's middle texture). This is
+            # how "Range" rises over a track WITHOUT reintroducing the refuted
+            # energy→amplitude law — depth is still NOT signal-scaled; the
+            # author declares the reach arc, exactly like the Pace/density arc.
+            if gain_arc is not None and i < len(gain_arc):
+                half *= max(0.0, min(1.0, gain_arc[i]))
             # Even count → each beat's peak→trough alternation is self-contained.
             n_pts = max(2, actions_per_beat, base_density)
             beat_dur = _next_dur(i)
@@ -762,6 +772,7 @@ def generate_from_beats(
     depth_model: str = "fixed",
     gate: float = 0.10,
     density_arc: "list[float] | str | None" = None,
+    gain_arc: "list[float] | None" = None,
     title: str = "",
     on_progress: "OnProgress | None" = None,
     progress_callback: "Callable[[str], None] | None" = None,
@@ -838,6 +849,7 @@ def generate_from_beats(
                 gate=gate,
                 modes=modes,
                 density_arc=arc,
+                gain_arc=gain_arc,
             )
             reporter.complete(summary=f"{len(curve)} curve points")
 
