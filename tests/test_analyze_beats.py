@@ -712,6 +712,167 @@ class TestAnalyzeBeatsWithChapters(unittest.TestCase):
         self.assertTrue(all(b >= 500 for b in result.beats))
 
 
+class TestMakeTimeChunks(unittest.TestCase):
+    """The synthetic time-window splitter — pure function, no librosa."""
+
+    def test_short_file_is_one_chunk(self):
+        from videoflow.audio import _make_time_chunks
+        self.assertEqual(_make_time_chunks(100_000, 180), [(0, 100_000)])
+
+    def test_long_file_splits_into_equal_windows(self):
+        from videoflow.audio import _make_time_chunks
+        # 9 min / 3-min windows = 3 clean chunks
+        self.assertEqual(
+            _make_time_chunks(540_000, 180),
+            [(0, 180_000), (180_000, 360_000), (360_000, 540_000)],
+        )
+
+    def test_short_trailing_remainder_merges_into_last(self):
+        from videoflow.audio import _make_time_chunks
+        # 9m40s: the 40s tail (< half a 3-min chunk) folds into chunk 3
+        self.assertEqual(
+            _make_time_chunks(580_000, 180),
+            [(0, 180_000), (180_000, 360_000), (360_000, 580_000)],
+        )
+
+    def test_substantial_trailing_remainder_kept_separate(self):
+        from videoflow.audio import _make_time_chunks
+        # 11 min: the 2-min tail (> half a 3-min chunk) stays its own window
+        self.assertEqual(
+            _make_time_chunks(660_000, 180),
+            [(0, 180_000), (180_000, 360_000), (360_000, 540_000), (540_000, 660_000)],
+        )
+
+    def test_chunks_cover_the_whole_timeline(self):
+        from videoflow.audio import _make_time_chunks
+        spans = _make_time_chunks(1_234_567, 180)
+        self.assertEqual(spans[0][0], 0)
+        self.assertEqual(spans[-1][1], 1_234_567)
+        for (a, b), (c, _d) in zip(spans, spans[1:]):
+            self.assertEqual(b, c)  # contiguous, no gaps/overlaps
+
+
+class TestAnalyzeBeatsChunked(unittest.TestCase):
+    """Time-windowed chunking (chunk_secs) — the chapters machinery applied
+    to material with no semantic chapter list.
+    """
+
+    _click_audio = staticmethod(TestAnalyzeBeatsWithChapters._click_audio)
+    _write_wav = TestAnalyzeBeatsWithChapters._write_wav
+
+    def test_chunk_secs_splits_and_stitches(self):
+        """A long file with chunk_secs is split into windows; beats stitch ascending."""
+        from tempfile import TemporaryDirectory
+        from videoflow.audio import analyze_beats
+
+        with TemporaryDirectory() as td:
+            path = self._write_wav(
+                Path(td) / "click.wav", self._click_audio(30.0, 120.0),
+            )
+            result = analyze_beats(path, chunk_secs=10)
+        self.assertGreater(len(result.beats), 0)
+        self.assertEqual(result.beats, sorted(result.beats))
+        # beats should land across all three 10s windows
+        self.assertTrue(any(b < 10_000 for b in result.beats))
+        self.assertTrue(any(10_000 <= b < 20_000 for b in result.beats))
+        self.assertTrue(any(b >= 20_000 for b in result.beats))
+
+    def test_chunk_secs_progress_labels_say_chunk(self):
+        """progress_callback fires 'Analyzing chunk X/Y…' per window."""
+        from tempfile import TemporaryDirectory
+        from videoflow.audio import analyze_beats
+
+        labels: list[str] = []
+        with TemporaryDirectory() as td:
+            path = self._write_wav(
+                Path(td) / "click.wav", self._click_audio(30.0, 120.0),
+            )
+            analyze_beats(path, chunk_secs=10, progress_callback=labels.append)
+        chunk_labels = [lb for lb in labels if "chunk" in lb.lower()]
+        self.assertEqual(len(chunk_labels), 3)
+        self.assertIn("1/3", chunk_labels[0])
+        self.assertIn("3/3", chunk_labels[2])
+
+    def test_chunk_secs_per_chunk_energy_normalization(self):
+        """Each window self-normalizes its energy to 1.0 (quiet intro not crushed)."""
+        from tempfile import TemporaryDirectory
+        import numpy as np
+        from videoflow.audio import analyze_beats
+
+        with TemporaryDirectory() as td:
+            quiet = self._click_audio(15.0, 120.0) * 0.05
+            loud = self._click_audio(15.0, 120.0) * 0.6
+            y = np.concatenate([quiet, loud])
+            path = self._write_wav(Path(td) / "mixed.wav", y)
+            result = analyze_beats(path, chunk_secs=15)
+        first = [e for b, e in zip(result.beats, result.energy) if b < 15_000]
+        second = [e for b, e in zip(result.beats, result.energy) if b >= 15_000]
+        self.assertGreater(max(first), 0.95, "quiet window self-normalizes")
+        self.assertGreater(max(second), 0.95, "loud window self-normalizes")
+
+    def test_chunk_secs_short_file_no_split(self):
+        """A file shorter than one window is analysed whole — no 'chunk' labels."""
+        from tempfile import TemporaryDirectory
+        from videoflow.audio import analyze_beats
+
+        labels: list[str] = []
+        with TemporaryDirectory() as td:
+            path = self._write_wav(
+                Path(td) / "click.wav", self._click_audio(20.0, 120.0),
+            )
+            result = analyze_beats(path, chunk_secs=180, progress_callback=labels.append)
+        self.assertGreater(len(result.beats), 0)
+        self.assertEqual([lb for lb in labels if "chunk" in lb.lower()], [])
+
+    def test_chunk_secs_true_uses_default_width(self):
+        """chunk_secs=True works and (on a short file) keeps a single window."""
+        from tempfile import TemporaryDirectory
+        from videoflow.audio import analyze_beats
+
+        with TemporaryDirectory() as td:
+            path = self._write_wav(
+                Path(td) / "click.wav", self._click_audio(20.0, 120.0),
+            )
+            result = analyze_beats(path, chunk_secs=True)
+        self.assertGreater(len(result.beats), 0)
+
+    def test_chunk_secs_runs_hpss_per_chunk(self):
+        """source='percussive' + chunk_secs → HPSS runs once PER window, not once
+        over the whole file (the fix for a monolithic multi-hour HPSS hang)."""
+        import numpy as np
+        mock_lib = _make_librosa_mock(duration_s=30.0, beat_count=40)
+        mock_lib.effects.hpss.side_effect = lambda y: (y, y)
+        with patch("videoflow.audio._librosa", mock_lib), \
+             patch("videoflow.audio._np", np), \
+             patch.object(Path, "exists", return_value=True):
+            from videoflow.audio import analyze_beats
+            analyze_beats("track.mp3", source="percussive", chunk_secs=10)
+        # 30s / 10s = 3 windows → 3 HPSS calls
+        self.assertEqual(mock_lib.effects.hpss.call_count, 3)
+
+    def test_chapters_win_over_chunk_secs(self):
+        """When both are given, chapters take precedence (they carry meaning)."""
+        from tempfile import TemporaryDirectory
+        from videoflow.audio import analyze_beats
+        from videoflow.chapters import Chapter
+
+        labels: list[str] = []
+        with TemporaryDirectory() as td:
+            path = self._write_wav(
+                Path(td) / "click.wav", self._click_audio(40.0, 120.0),
+            )
+            analyze_beats(
+                path,
+                chapters=[Chapter(at_ms=0, end_ms=20_000),
+                          Chapter(at_ms=20_000, end_ms=40_000)],
+                chunk_secs=5,
+                progress_callback=labels.append,
+            )
+        # chapter labels, not chunk labels
+        self.assertEqual(len([lb for lb in labels if "chapter" in lb.lower()]), 2)
+        self.assertEqual([lb for lb in labels if "chunk" in lb.lower()], [])
+
+
 class TestTempoOctaveCorrection(unittest.TestCase):
     """The tempo-octave guard — folds a doubled tempo back to the felt pulse
     without touching genuinely fast tracks. Pure function, no librosa.

@@ -183,6 +183,46 @@ _TRACKERS = ("auto", "beat_track", "plp")
 # to librosa.beat.plp (locally-stable tempo, robust over multi-hour tracks).
 PLP_AUTO_DURATION_MS = 10 * 60 * 1000  # 10 minutes
 
+# Default width of a synthetic time chunk when `chunk_secs` is requested
+# without an explicit value. ~3-minute windows give a 2-hour file ~40
+# progress steps ("chunk 4/40") — enough to prove the analysis is moving,
+# few enough that beat tracking still has a meaningful span to work with.
+DEFAULT_CHUNK_SECS = 180.0
+# Trailing remainder shorter than this fraction of a full chunk is merged
+# into the final chunk rather than analysed as a runt (a 10s tail tracks
+# badly and adds a useless progress step).
+_CHUNK_MERGE_TAIL_FRACTION = 0.5
+
+
+def _make_time_chunks(duration_ms: int, chunk_secs: float) -> list[tuple[int, int]]:
+    """Split ``[0, duration_ms]`` into ~``chunk_secs``-wide ``(at_ms, end_ms)``
+    spans for chunked analysis.
+
+    Used when a long file has no semantic chapters: equal-width time windows
+    are still enough to (a) emit per-chunk progress so a multi-minute analysis
+    visibly advances ("chunk 4/12") instead of looking hung, and (b) normalise
+    energy per window so a quiet intro isn't crushed by a loud climax's RMS.
+    The trailing remainder is merged into the last chunk when it is shorter
+    than half a chunk, so we never analyse a useless runt at the end.
+    """
+    chunk_ms = max(1000, int(round(chunk_secs * 1000)))
+    if duration_ms <= chunk_ms:
+        return [(0, duration_ms)]
+    spans: list[tuple[int, int]] = []
+    at = 0
+    while at < duration_ms:
+        end = min(at + chunk_ms, duration_ms)
+        spans.append((at, end))
+        at = end
+    # Merge a short trailing remainder into the chunk before it.
+    if len(spans) >= 2:
+        last_start, last_end = spans[-1]
+        if (last_end - last_start) < chunk_ms * _CHUNK_MERGE_TAIL_FRACTION:
+            prev_start, _ = spans[-2]
+            spans[-2] = (prev_start, last_end)
+            spans.pop()
+    return spans
+
 
 def _coverage_shortfall(
     decoded_ms: int, source_ms: int, *, tol: float = 0.02, min_gap_ms: int = 5000,
@@ -217,6 +257,7 @@ def analyze_beats(
     progress_callback=None,
     on_progress: OnProgress | None = None,
     chapters: list["Chapter"] | None = None,
+    chunk_secs: float | None = None,
     _reporter: "ProgressReporter | None" = None,
 ) -> AudioBeatMap:
     """Analyse the beat structure of an audio or video file.
@@ -282,6 +323,19 @@ def analyze_beats(
                 in chapter order; the reported ``bpm`` is the
                 duration-weighted mean of per-chapter BPMs. Pass ``None``
                 (default) for whole-file analysis.
+        chunk_secs: When set (and ``chapters`` is not given), split a long
+                file into equal-width time windows of roughly this many
+                seconds and analyse each window in isolation — same
+                stitching and per-chunk energy normalisation as the
+                ``chapters`` path, but for material with no semantic
+                chapter list. The point is responsiveness on long files:
+                each window emits its own progress message ("chunk 4/12")
+                and runs its own (cheaper) tracker + HPSS pass, so a
+                multi-hour analysis visibly advances instead of looking
+                hung inside one monolithic librosa call. Pass ``True`` to
+                use :data:`DEFAULT_CHUNK_SECS`. Ignored when ``chapters``
+                is provided (chapters win — they carry meaning). ``None``
+                (default) keeps whole-file analysis.
         progress_callback: **Deprecated** legacy progress hook —
                 ``Callable[[str], None]`` invoked with stage labels.
                 Errors are swallowed. Prefer ``on_progress`` for new
@@ -419,33 +473,56 @@ def analyze_beats(
             if _cov_warn:
                 _progress(_cov_warn)
 
-            # Select the signal used for beat tracking and energy.
-            # HPSS separates harmonic (voice, melody) from percussive (drums).
-            if source == "percussive":
-                with reporter.stage("hpss"):
-                    _progress("Separating percussive component (HPSS)…")
-                    _, y_track = _librosa.effects.hpss(y)
-                    reporter.complete(summary="percussive component isolated")
-            else:
-                y_track = y
-
+            # Decide whether to analyse in chunks. Chapters (semantic spans)
+            # win — they carry meaning. Otherwise a long file with chunk_secs
+            # requested is split into equal-width time windows. Both go through
+            # the same per-chunk loop, which runs HPSS (if any) PER CHUNK so a
+            # long analysis never blocks inside one monolithic librosa call and
+            # energy is normalised per window.
+            chunk_spans: list[tuple[int, int]] | None = None
+            label_kind = "chunk"
             if chapters:
-                with reporter.stage("chapters"):
-                    bpm, beats_ms, downbeats_ms, stanzas, energy = _analyze_per_chapter(
-                        y_track, sr_, duration_ms,
-                        chapters=chapters,
+                chunk_spans = [
+                    (ch.at_ms, ch.end_ms if ch.end_ms is not None else duration_ms)
+                    for ch in chapters
+                ]
+                label_kind = "chapter"
+            elif chunk_secs:
+                width = DEFAULT_CHUNK_SECS if chunk_secs is True else float(chunk_secs)
+                spans = _make_time_chunks(duration_ms, width)
+                if len(spans) > 1:
+                    chunk_spans = spans
+                    label_kind = "chunk"
+
+            if chunk_spans is not None:
+                stage_name = "chapters" if label_kind == "chapter" else "chunks"
+                with reporter.stage(stage_name):
+                    bpm, beats_ms, downbeats_ms, stanzas, energy = _analyze_chunks(
+                        y, sr_, duration_ms,
+                        spans=chunk_spans,
+                        source=source,
                         tracker=tracker,
                         locked_bpm=locked_bpm,
                         progress=_progress,
                         reporter=reporter,
+                        label_kind=label_kind,
                     )
                     reporter.complete(
                         summary=(
-                            f"{len(chapters)} chapters · "
+                            f"{len(chunk_spans)} {label_kind}s · "
                             f"BPM {bpm:.0f} · {len(beats_ms)} beats"
                         ),
                     )
             else:
+                # Whole-file path. Select the tracking signal once: HPSS
+                # separates harmonic (voice, melody) from percussive (drums).
+                if source == "percussive":
+                    with reporter.stage("hpss"):
+                        _progress("Separating percussive component (HPSS)…")
+                        _, y_track = _librosa.effects.hpss(y)
+                        reporter.complete(summary="percussive component isolated")
+                else:
+                    y_track = y
                 with reporter.stage("track"):
                     bpm, beats_ms, downbeats_ms, stanzas, energy = _analyze_buffer(
                         y_track, sr_, duration_ms,
@@ -627,32 +704,42 @@ def _analyze_buffer(
     return bpm, beats_ms, downbeats_ms, stanzas, energy
 
 
-def _analyze_per_chapter(
-    y_track,
+def _analyze_chunks(
+    y,
     sr: int,
     duration_ms: int,
     *,
-    chapters: list["Chapter"],
+    spans: list[tuple[int, int]],
+    source: str,
     tracker: str,
     locked_bpm: float | None,
     progress,
     reporter: ProgressReporter | None = None,
+    label_kind: str = "chunk",
 ) -> tuple[float, list[int], list[int], list[tuple[int, int]], list[float]]:
-    """Run :func:`_analyze_buffer` per chapter and stitch the results.
+    """Run :func:`_analyze_buffer` per time-span and stitch the results.
 
-    Each chapter is analysed in isolation — beat tracking, stanza
-    grouping, AND energy normalisation all happen against the chunk's
-    own audio. Then beats / downbeats / stanzas / energies are
-    concatenated in chapter order; the reported BPM is the
-    duration-weighted mean of per-chapter BPMs.
+    *spans* is a list of ``(at_ms, end_ms)`` windows — either semantic
+    chapters or synthetic equal-width time chunks. Each span is analysed
+    in isolation: HPSS (when ``source == 'percussive'``), beat tracking,
+    stanza grouping, AND energy normalisation all happen against that
+    window's own audio. Then beats / downbeats / stanzas / energies are
+    concatenated in order; the reported BPM is the duration-weighted mean
+    of per-span BPMs.
 
-    If a *reporter* is supplied, each chapter opens its own nested
-    sub-stage so UIs can render the per-chapter progress as a tree.
+    HPSS runs **per span**, not once over the whole file — that is what
+    keeps a multi-hour percussive analysis from blocking inside one giant
+    ``librosa.effects.hpss`` call with no feedback. *y* is therefore the
+    RAW signal; this function selects the tracking signal per chunk.
+
+    If a *reporter* is supplied, each span opens its own nested sub-stage
+    so UIs can render the per-chunk progress as a tree. *label_kind*
+    ("chunk" / "chapter") only changes the progress wording.
     """
-    if not chapters:
-        return _analyze_buffer(
-            y_track, sr, duration_ms,
-            tracker=tracker, locked_bpm=locked_bpm,
+    if not spans:
+        return _select_and_analyze_buffer(
+            y, sr, duration_ms,
+            source=source, tracker=tracker, locked_bpm=locked_bpm,
             progress=progress, time_offset_ms=0,
         )
 
@@ -663,33 +750,36 @@ def _analyze_per_chapter(
     weighted_bpm = 0.0
     total_weight = 0
 
-    for i, ch in enumerate(chapters):
-        end_ms = ch.end_ms if ch.end_ms is not None else duration_ms
-        chunk_duration_ms = max(0, end_ms - ch.at_ms)
+    n = len(spans)
+    for i, (at_ms, end_ms) in enumerate(spans):
+        end_ms = end_ms if end_ms is not None else duration_ms
+        chunk_duration_ms = max(0, end_ms - at_ms)
         if chunk_duration_ms < 1000:
             continue  # skip sub-second chunks — beat tracker can't say much
 
         progress(
-            f"Analyzing chapter {i + 1}/{len(chapters)} "
-            f"({ch.at_ms // 1000}s-{end_ms // 1000}s)…"
+            f"Analyzing {label_kind} {i + 1}/{n} "
+            f"({at_ms // 1000}s-{end_ms // 1000}s)…"
         )
 
-        chapter_label = f"chapter {i + 1}/{len(chapters)}"
-        chapter_ctx = (
-            reporter.stage(chapter_label) if reporter is not None else _nullcontext()
+        span_label = f"{label_kind} {i + 1}/{n}"
+        span_ctx = (
+            reporter.stage(span_label) if reporter is not None else _nullcontext()
         )
 
-        start_sample = max(0, int(round(ch.at_ms / 1000.0 * sr)))
-        end_sample = min(len(y_track), int(round(end_ms / 1000.0 * sr)))
-        y_chunk = y_track[start_sample:end_sample]
+        start_sample = max(0, int(round(at_ms / 1000.0 * sr)))
+        end_sample = min(len(y), int(round(end_ms / 1000.0 * sr)))
+        y_chunk = y[start_sample:end_sample]
         if len(y_chunk) < sr:
             continue
 
-        with chapter_ctx:
-            chunk_bpm, chunk_beats, chunk_db, chunk_stanzas, chunk_energy = _analyze_buffer(
-                y_chunk, sr, chunk_duration_ms,
-                tracker=tracker, locked_bpm=locked_bpm,
-                progress=progress, time_offset_ms=ch.at_ms,
+        with span_ctx:
+            chunk_bpm, chunk_beats, chunk_db, chunk_stanzas, chunk_energy = (
+                _select_and_analyze_buffer(
+                    y_chunk, sr, chunk_duration_ms,
+                    source=source, tracker=tracker, locked_bpm=locked_bpm,
+                    progress=progress, time_offset_ms=at_ms,
+                )
             )
             if reporter is not None:
                 reporter.complete(
@@ -706,3 +796,32 @@ def _analyze_per_chapter(
 
     bpm = weighted_bpm / total_weight if total_weight > 0 else 0.0
     return bpm, all_beats, all_downbeats, all_stanzas, all_energy
+
+
+def _select_and_analyze_buffer(
+    y,
+    sr: int,
+    duration_ms: int,
+    *,
+    source: str,
+    tracker: str,
+    locked_bpm: float | None,
+    progress,
+    time_offset_ms: int,
+) -> tuple[float, list[int], list[int], list[tuple[int, int]], list[float]]:
+    """HPSS-if-percussive then :func:`_analyze_buffer`, for one buffer.
+
+    Pulls the per-chunk HPSS into a small helper so each chunk separates
+    its own percussive component (and emits its own progress) rather than
+    relying on one whole-file pass.
+    """
+    if source == "percussive":
+        progress("Separating percussive component (HPSS)…")
+        _, y_track = _librosa.effects.hpss(y)
+    else:
+        y_track = y
+    return _analyze_buffer(
+        y_track, sr, duration_ms,
+        tracker=tracker, locked_bpm=locked_bpm,
+        progress=progress, time_offset_ms=time_offset_ms,
+    )
