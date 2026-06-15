@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 
 from videoflow.chapters import Chapter
 from videoflow.sidecar import (
+    ANALYZER_VERSION,
     CURRENT_SCHEMA_VERSION,
     SCHEMA_NAME,
     SidecarError,
@@ -230,6 +231,52 @@ class TestFreshWrite(unittest.TestCase):
                 writer="x",
             )
             self.assertEqual(path, sidecar_path_for(media))
+
+
+# ---------------------------------------------------------------------------
+# Analyzer-version stamp — FunscriptForge's auto-analyze gate compares this
+# against its ANALYZER_VERSION mirror and re-runs on mismatch.
+# ---------------------------------------------------------------------------
+
+class TestAnalyzerVersionStamp(unittest.TestCase):
+
+    def test_analyze_write_stamps_current_version(self):
+        with TemporaryDirectory() as td:
+            media = _media(td)
+            write_sidecar(
+                media, {"chapters": [{"at_ms": 0, "content_type": "music"}]},
+                writer="videoflow.structural", mode="analyze",
+            )
+            doc = json.loads(sidecar_path_for(media).read_text(encoding="utf-8"))
+            self.assertEqual(doc["analyzer_version"], ANALYZER_VERSION)
+
+    def test_edit_write_preserves_the_analyzer_stamp(self):
+        # A user editing chapter names (edit mode) must NOT look like a fresh
+        # analysis — the analyzer stamp the analyze pass left is preserved.
+        with TemporaryDirectory() as td:
+            media = _media(td)
+            write_sidecar(
+                media, {"chapters": [{"at_ms": 0, "content_type": "music"}]},
+                writer="videoflow.structural", mode="analyze",
+            )
+            write_sidecar(
+                media, {"chapters": [{"at_ms": 0, "name": "Intro"}]},
+                writer="FunscriptForge", mode="edit",
+            )
+            doc = json.loads(sidecar_path_for(media).read_text(encoding="utf-8"))
+            self.assertEqual(doc["analyzer_version"], ANALYZER_VERSION)
+
+    def test_edit_only_doc_has_no_analyzer_stamp(self):
+        # A sidecar only ever touched by an edit writer (no analyze pass) has
+        # no stamp — load_project surfaces None and the JS gate grandfathers it.
+        with TemporaryDirectory() as td:
+            media = _media(td)
+            write_sidecar(
+                media, {"chapters": [{"at_ms": 0, "name": "Intro"}]},
+                writer="FunscriptForge", mode="edit",
+            )
+            doc = json.loads(sidecar_path_for(media).read_text(encoding="utf-8"))
+            self.assertNotIn("analyzer_version", doc)
 
 
 # ---------------------------------------------------------------------------

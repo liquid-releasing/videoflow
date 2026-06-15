@@ -38,6 +38,17 @@ from videoflow.chapters import Chapter
 CURRENT_SCHEMA_VERSION = "3.0"
 SCHEMA_NAME = "audio-structure"
 
+# Analyzer (algorithm) version — DISTINCT from the schema version and the
+# package version. Bump this ONLY when the chapter/beat/energy detection
+# ALGORITHM changes such that an existing analysis should be regenerated
+# (e.g. a new chapter heuristic, a different beat tracker). Stamped into the
+# chapters.json on every analyze-mode write; consumers (FunscriptForge's
+# load_project + auto-analyze gate) compare it against their own mirror
+# constant and force a re-analyze on mismatch. Decoupled from the package
+# version so unrelated releases don't needlessly re-grind every project.
+# Mirror constant: funscriptforge ui/web/src/api/forge.js ANALYZER_VERSION.
+ANALYZER_VERSION = "1"
+
 WriteMode = Literal["analyze", "edit"]
 
 # Field categories — drives merge. See audio-structure-primitive.md.
@@ -236,6 +247,14 @@ def write_sidecar(
             writer=writer, writer_version=writer_version, mode=mode,
         )
 
+    # Stamp the analyzer (algorithm) version on every analyze-mode write so
+    # consumers can detect a version bump and re-analyze. Edit-mode writes
+    # preserve whatever the analyzer last stamped (merged already carries it
+    # from the existing doc) — a user editing chapter names must not look like
+    # a fresh analysis.
+    if mode == "analyze":
+        merged["analyzer_version"] = ANALYZER_VERSION
+
     target.write_text(
         json.dumps(merged, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -383,7 +402,7 @@ def _fresh_payload(
 
 
 _KNOWN_TOP_LEVEL = frozenset({
-    "schema", "version", "chapters", "stanzas", "energy",
+    "schema", "version", "analyzer_version", "chapters", "stanzas", "energy",
     "provenance", "auto_generated", "generated_by",
 })
 
