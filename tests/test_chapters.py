@@ -71,6 +71,24 @@ class TestChapterDataclass(unittest.TestCase):
         clone = Chapter.from_dict(c.to_dict())
         self.assertEqual(c, clone)
 
+    def test_tone_round_trips(self):
+        # User-chosen tone must survive to_dict/from_dict so the Chapters tab
+        # rehydrates the accepted tone on reopen instead of resetting to the
+        # analyzer suggestion.
+        c = Chapter(at_ms=0, end_ms=1_000, name="x", intent="build", tone="edge")
+        d = c.to_dict()
+        self.assertEqual(d["tone"], "edge")
+        self.assertEqual(Chapter.from_dict(d).tone, "edge")
+
+    def test_to_dict_omits_empty_tone(self):
+        # Authored / un-toned chapters stay compact — no empty "tone" key.
+        c = Chapter(at_ms=0, end_ms=1_000, name="x")
+        self.assertNotIn("tone", c.to_dict())
+
+    def test_from_dict_defaults_tone_when_absent(self):
+        # Legacy sidecars (pre-tone) parse with an empty tone, not an error.
+        self.assertEqual(Chapter.from_dict({"at_ms": 0, "name": "y"}).tone, "")
+
 
 # ---------------------------------------------------------------------------
 # Sidecar reader

@@ -138,6 +138,11 @@ class Chapter:
     voice_label: str = ""
     confidence: float | None = None
     evidence: list[str] = dataclasses.field(default_factory=list)
+    # User-chosen tone id (FunscriptForge Chapters tab: tender/build/tease/
+    # edge/climax/dominant/tame, or "none" for Untoned). Empty until the
+    # user accepts a tone; persisted so the choice survives reopen rather
+    # than resetting to the analyzer suggestion.
+    tone: str = ""
 
     def to_dict(self) -> dict:
         """Return a JSON-serialisable dict.
@@ -162,6 +167,8 @@ class Chapter:
             out["confidence"] = self.confidence
         if self.evidence:
             out["evidence"] = list(self.evidence)
+        if self.tone:
+            out["tone"] = self.tone
         return out
 
     @classmethod
@@ -209,6 +216,7 @@ class Chapter:
             confidence = float(confidence)
         evidence_raw = data.get("evidence") or []
         evidence = [str(e) for e in evidence_raw] if isinstance(evidence_raw, list) else []
+        tone = str(data.get("tone") or "")
         return cls(
             at_ms=at_ms,
             end_ms=end_ms,
@@ -218,6 +226,7 @@ class Chapter:
             voice_label=voice_label,
             confidence=confidence,
             evidence=evidence,
+            tone=tone,
         )
 
 
