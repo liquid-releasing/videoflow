@@ -781,6 +781,13 @@ def _parse_ffmpeg_progress_line(line: str) -> str | None:
     return f"Extracting audio… {_format_extract_timestamp(us)} done"
 
 
+# Salvage thresholds for a mid-file extraction abort (corrupt audio stream).
+# Only salvage when a meaningful run of clean audio decoded first, and back off
+# this far from the failure point so the corrupt frame stays outside the cut.
+_SALVAGE_MIN_US = 30_000_000   # need ≥30s of clean audio to bother salvaging
+_SALVAGE_MARGIN_S = 8.0        # trim this many seconds before the failure point
+
+
 def _run_ffmpeg_with_progress(
     ffmpeg: str,
     media_path: Path,
@@ -788,6 +795,7 @@ def _run_ffmpeg_with_progress(
     *,
     sr: int,
     progress: Callable[[str], None],
+    _to_secs: float | None = None,
 ) -> int:
     """Run ffmpeg → mono WAV, emitting sub-stage progress lines like
     ``Extracting audio… 0:23 done`` while it works. Returns the exit code.
@@ -796,7 +804,19 @@ def _run_ffmpeg_with_progress(
     ffmpeg only block-flushes stdout pipes on exit (verified — pipe-mode
     delivers nothing until the process closes), whereas the file path
     flushes incrementally as expected. A background thread polls the
-    file every 500 ms and streams new lines through ``progress``."""
+    file every 500 ms and streams new lines through ``progress``.
+
+    Resilience: a corrupt audio stream (e.g. a bad AAC packet that decodes to
+    a bogus channel count) makes ffmpeg abort the WHOLE conversion mid-file
+    with EINVAL — no filter/decoder flag recovers, because the filtergraph
+    can't reconfigure for the garbage frame. When that happens we SALVAGE:
+    re-run limited to the clean audio that decoded before the failure
+    (``-to <last_good − margin>``), so beat/chapter analysis proceeds on the
+    good portion with a visible warning instead of crashing outright. A file
+    corrupt from the very start (no clean head) still returns the failure
+    code. ``-err_detect ignore_err`` + ``-fflags +discardcorrupt`` keep
+    mildly-glitchy streams from aborting in the first place. The internal
+    ``_to_secs`` arg is the salvage limit and guards against re-salvaging."""
     import os
     import threading
     import time
@@ -804,14 +824,22 @@ def _run_ffmpeg_with_progress(
     fd, progress_path = tempfile.mkstemp(suffix=".log", prefix="vfprog_")
     os.close(fd)
 
+    cmd = [
+        ffmpeg, "-y",
+        # Tolerate decode errors on glitchy streams rather than aborting.
+        "-err_detect", "ignore_err", "-fflags", "+discardcorrupt",
+        "-i", str(media_path),
+        "-vn", "-ar", str(sr), "-ac", "1",
+        "-f", "wav",
+        "-progress", progress_path, "-nostats",
+    ]
+    if _to_secs is not None:
+        # Salvage pass — stop before the corrupt region so the WAV finalizes.
+        cmd += ["-to", f"{_to_secs:.3f}"]
+    cmd.append(out_path)
+
     proc = subprocess.Popen(
-        [
-            ffmpeg, "-y", "-i", str(media_path),
-            "-vn", "-ar", str(sr), "-ac", "1",
-            "-f", "wav",
-            "-progress", progress_path, "-nostats",
-            out_path,
-        ],
+        cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         creationflags=_NO_WINDOW,
@@ -819,6 +847,7 @@ def _run_ffmpeg_with_progress(
 
     stop = threading.Event()
     last_label: list[str | None] = [None]
+    last_us: list[int] = [0]  # furthest decoded position, for salvage
 
     def _drain_once() -> None:
         try:
@@ -826,6 +855,12 @@ def _run_ffmpeg_with_progress(
         except OSError:
             return
         for raw in text.splitlines():
+            s = raw.strip()
+            if s.startswith("out_time_us="):
+                try:
+                    last_us[0] = max(last_us[0], int(s.split("=", 1)[1]))
+                except ValueError:
+                    pass
             label = _parse_ffmpeg_progress_line(raw)
             if label and label != last_label[0]:
                 last_label[0] = label
@@ -848,6 +883,19 @@ def _run_ffmpeg_with_progress(
             Path(progress_path).unlink()
         except OSError:
             pass
+
+    # Mid-file abort on a corrupt stream → salvage the clean head once.
+    if rc != 0 and _to_secs is None and last_us[0] >= _SALVAGE_MIN_US:
+        salvage_to = last_us[0] / 1_000_000 - _SALVAGE_MARGIN_S
+        if salvage_to > 1.0:
+            progress(
+                f"Audio damaged after {_format_extract_timestamp(last_us[0])}"
+                f" - recovering the clean portion..."
+            )
+            return _run_ffmpeg_with_progress(
+                ffmpeg, media_path, out_path,
+                sr=sr, progress=progress, _to_secs=salvage_to,
+            )
     return rc
 
 
