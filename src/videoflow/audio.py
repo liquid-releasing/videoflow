@@ -69,6 +69,13 @@ class AudioBeatMap:
     duration_ms: int
     """Total audio duration in milliseconds."""
 
+    damaged_after_ms: int | None = None
+    """When set, the source audio was corrupt past this timestamp (ms) and
+    only the clean head was analyzable. Beats/energy cover [0, ~here]; the
+    rest of the track has no analysis. Drives a user-facing 'damaged audio'
+    warning so a short/sparse result on a broken source isn't a surprise.
+    ``None`` for healthy sources."""
+
     @property
     def beat_interval_ms(self) -> float:
         """Average interval between beats in milliseconds."""
@@ -84,7 +91,7 @@ class AudioBeatMap:
 
     def to_dict(self) -> dict:
         """Return a JSON-serialisable dict representation."""
-        return {
+        out = {
             "bpm": self.bpm,
             "duration_ms": self.duration_ms,
             "beats": self.beats,
@@ -92,6 +99,9 @@ class AudioBeatMap:
             "stanzas": [{"start_ms": s, "end_ms": e} for s, e in self.stanzas],
             "energy": [round(e, 6) for e in self.energy],
         }
+        if self.damaged_after_ms is not None:
+            out["damaged_after_ms"] = self.damaged_after_ms
+        return out
 
     def save(self, path: str | Path) -> Path:
         """Save the beat map to a JSON file.
@@ -136,6 +146,10 @@ class AudioBeatMap:
                 downbeats=[int(b) for b in data["downbeats"]],
                 stanzas=[(int(p["start_ms"]), int(p["end_ms"])) for p in data["stanzas"]],
                 energy=[float(e) for e in data["energy"]],
+                damaged_after_ms=(
+                    int(data["damaged_after_ms"])
+                    if data.get("damaged_after_ms") is not None else None
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise BeatError(f"Invalid beat map file {path}: {exc}") from exc
@@ -410,6 +424,9 @@ def analyze_beats(
     with reporter.stage("audio.analyze"):
         # For video files, extract audio to a temp WAV via FFmpeg first.
         _tmp_audio = None
+        # Set when a corrupt-audio salvage truncated the clean head; stamped
+        # onto the returned beat map so consumers can warn the user.
+        _damaged_after_ms = None
         if input.suffix.lower() in _VIDEO_SUFFIXES:
             with reporter.stage("extract"):
                 _progress("Extracting audio from video (ffmpeg)…")
@@ -434,7 +451,7 @@ def analyze_beats(
                     # (numpy, librosa transitively) into audio.py's import
                     # graph for the non-extracting code paths.
                     from videoflow.structural import _run_ffmpeg_with_progress
-                    _rc = _run_ffmpeg_with_progress(
+                    _rc, _damaged_after_ms = _run_ffmpeg_with_progress(
                         _ffmpeg, input, _tmp_audio.name,
                         sr=sr, progress=_progress,
                     )
@@ -557,6 +574,7 @@ def analyze_beats(
         stanzas=stanzas,
         energy=energy,
         duration_ms=duration_ms,
+        damaged_after_ms=_damaged_after_ms,
     )
 
 

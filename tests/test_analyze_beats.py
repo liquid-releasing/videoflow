@@ -237,6 +237,36 @@ class TestAnalyzeBeats(unittest.TestCase):
         self.assertEqual(bm.beats_in_range(100, 400), [])
 
     # ------------------------------------------------------------------
+    # damaged_after_ms (corrupt-audio salvage marker)
+    # ------------------------------------------------------------------
+
+    def test_damaged_after_ms_round_trips(self):
+        import json, tempfile, os
+        from videoflow.audio import AudioBeatMap
+        bm = AudioBeatMap(
+            bpm=120.0, beats=[0, 500], downbeats=[0], stanzas=[(0, 500)],
+            energy=[1.0, 1.0], duration_ms=500, damaged_after_ms=1_285_000,
+        )
+        self.assertEqual(bm.to_dict()["damaged_after_ms"], 1_285_000)
+        f = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        f.close()
+        try:
+            bm.save(f.name)
+            self.assertEqual(AudioBeatMap.load(f.name).damaged_after_ms, 1_285_000)
+        finally:
+            os.unlink(f.name)
+
+    def test_damaged_after_ms_defaults_none_and_omitted(self):
+        # Healthy sources carry no marker and stay compact on disk.
+        from videoflow.audio import AudioBeatMap
+        bm = AudioBeatMap(
+            bpm=120.0, beats=[0], downbeats=[0], stanzas=[(0, 1)],
+            energy=[1.0], duration_ms=1,
+        )
+        self.assertIsNone(bm.damaged_after_ms)
+        self.assertNotIn("damaged_after_ms", bm.to_dict())
+
+    # ------------------------------------------------------------------
     # nearest_beat
     # ------------------------------------------------------------------
 

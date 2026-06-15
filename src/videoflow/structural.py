@@ -743,7 +743,7 @@ def _prepare_audio(
     )
     tmp.close()
     try:
-        rc = _run_ffmpeg_with_progress(
+        rc, _damaged_ms = _run_ffmpeg_with_progress(
             ffmpeg, media_path, tmp.name, sr=sr, progress=progress,
         )
         if rc != 0:
@@ -796,9 +796,12 @@ def _run_ffmpeg_with_progress(
     sr: int,
     progress: Callable[[str], None],
     _to_secs: float | None = None,
-) -> int:
+) -> tuple[int, int | None]:
     """Run ffmpeg → mono WAV, emitting sub-stage progress lines like
-    ``Extracting audio… 0:23 done`` while it works. Returns the exit code.
+    ``Extracting audio… 0:23 done`` while it works. Returns
+    ``(exit_code, damaged_after_ms)`` — ``damaged_after_ms`` is the timestamp
+    where a corrupt-audio salvage truncated the clean head, or ``None`` when
+    the full file extracted cleanly.
 
     Uses ``-progress <file>`` rather than ``-progress pipe:1`` because
     ffmpeg only block-flushes stdout pipes on exit (verified — pipe-mode
@@ -888,15 +891,19 @@ def _run_ffmpeg_with_progress(
     if rc != 0 and _to_secs is None and last_us[0] >= _SALVAGE_MIN_US:
         salvage_to = last_us[0] / 1_000_000 - _SALVAGE_MARGIN_S
         if salvage_to > 1.0:
+            damaged_after_ms = int(salvage_to * 1000)
             progress(
                 f"Audio damaged after {_format_extract_timestamp(last_us[0])}"
                 f" - recovering the clean portion..."
             )
-            return _run_ffmpeg_with_progress(
+            salvage_rc, _ = _run_ffmpeg_with_progress(
                 ffmpeg, media_path, out_path,
                 sr=sr, progress=progress, _to_secs=salvage_to,
             )
-    return rc
+            # Report the damage point only when the salvage actually produced
+            # the clean head; a failed salvage is just a plain failure.
+            return salvage_rc, (damaged_after_ms if salvage_rc == 0 else None)
+    return rc, None
 
 
 # ---------------------------------------------------------------------------
