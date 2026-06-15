@@ -675,10 +675,14 @@ class TestAnalyzeBeatsWithChapters(unittest.TestCase):
             ]
             analyze_beats(path, chapters=chapters, progress_callback=labels.append)
 
-        chunk_labels = [lb for lb in labels if "chapter" in lb.lower()]
-        self.assertEqual(len(chunk_labels), 2)
-        self.assertIn("1/2", chunk_labels[0])
-        self.assertIn("2/2", chunk_labels[1])
+        # The per-chunk announcement fires once per chapter span. (The chunk
+        # label now also PREFIXES each sub-step message — HPSS/beats/stanzas —
+        # so the footer keeps showing progress on long files; filter to the
+        # announcement line to count spans.)
+        announce = [lb for lb in labels if lb.startswith("Analyzing chapter")]
+        self.assertEqual(len(announce), 2)
+        self.assertIn("1/2", announce[0])
+        self.assertIn("2/2", announce[1])
 
     def test_empty_chapters_falls_back_to_whole_file(self):
         """Empty list is treated as 'no chapters' — whole-file analysis runs."""
@@ -788,10 +792,12 @@ class TestAnalyzeBeatsChunked(unittest.TestCase):
                 Path(td) / "click.wav", self._click_audio(30.0, 120.0),
             )
             analyze_beats(path, chunk_secs=10, progress_callback=labels.append)
-        chunk_labels = [lb for lb in labels if "chunk" in lb.lower()]
-        self.assertEqual(len(chunk_labels), 3)
-        self.assertIn("1/3", chunk_labels[0])
-        self.assertIn("3/3", chunk_labels[2])
+        # Filter to the per-window announcement line (the chunk label also
+        # prefixes each sub-step message now, so count announcements).
+        announce = [lb for lb in labels if lb.startswith("Analyzing chunk")]
+        self.assertEqual(len(announce), 3)
+        self.assertIn("1/3", announce[0])
+        self.assertIn("3/3", announce[2])
 
     def test_chunk_secs_per_chunk_energy_normalization(self):
         """Each window self-normalizes its energy to 1.0 (quiet intro not crushed)."""
@@ -868,8 +874,11 @@ class TestAnalyzeBeatsChunked(unittest.TestCase):
                 chunk_secs=5,
                 progress_callback=labels.append,
             )
-        # chapter labels, not chunk labels
-        self.assertEqual(len([lb for lb in labels if "chapter" in lb.lower()]), 2)
+        # chapter spans drive analysis, not chunk time-windows: the per-span
+        # announcement says "chapter", and no "chunk" split label appears
+        # anywhere (including the now-prefixed sub-step messages).
+        announce = [lb for lb in labels if lb.startswith("Analyzing chapter")]
+        self.assertEqual(len(announce), 2)
         self.assertEqual([lb for lb in labels if "chunk" in lb.lower()], [])
 
 

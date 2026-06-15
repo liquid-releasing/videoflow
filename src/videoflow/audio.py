@@ -766,6 +766,13 @@ def _analyze_chunks(
         span_ctx = (
             reporter.stage(span_label) if reporter is not None else _nullcontext()
         )
+        # Keep the chunk counter visible THROUGHOUT the chunk. The sub-steps
+        # below (HPSS, beat tracking, stanzas) all emit through `progress`, so
+        # without a prefix they overwrite the "Analyzing chunk i/n" line above
+        # and the footer shows a lone "Separating percussive (HPSS)…" that
+        # looks stuck on a long file. Prefixing restores the sense of progress.
+        def _span_progress(msg, _label=span_label):
+            progress(f"{_label} · {msg}")
 
         start_sample = max(0, int(round(at_ms / 1000.0 * sr)))
         end_sample = min(len(y), int(round(end_ms / 1000.0 * sr)))
@@ -778,7 +785,7 @@ def _analyze_chunks(
                 _select_and_analyze_buffer(
                     y_chunk, sr, chunk_duration_ms,
                     source=source, tracker=tracker, locked_bpm=locked_bpm,
-                    progress=progress, time_offset_ms=at_ms,
+                    progress=_span_progress, time_offset_ms=at_ms,
                 )
             )
             if reporter is not None:
