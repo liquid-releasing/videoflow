@@ -186,6 +186,82 @@ def _probe_video_dimensions(
     return int(match.group(1)), int(match.group(2))
 
 
+def is_direct_playable(media_path: str | Path) -> bool:
+    """True when the source streams cleanly into an embedded Chromium <video>
+    via asset:// WITHOUT a normalizing re-encode — so the per-chapter clip
+    pre-build can be SKIPPED entirely (single-file streaming fast path).
+
+    Mirrors FunscriptForge's ``cli.py::_verdict_direct_playable`` (the same
+    criteria drive the editor's playback-time decision in useChapterClip.js);
+    keep the two in sync. The clip pipeline exists for sources that STUTTER /
+    OOM played whole — long high-bitrate / 4K / VFR / HDR / >8-bit / exotic
+    profile — so we only skip clips when confident WebView2 handles the source
+    cleanly. CONSERVATIVE: any probe failure or any disqualifier returns False
+    (→ extract clips as before), because a false "playable" costs the user a
+    stuttering preview while a false "not playable" only costs a clip.
+
+    Audio-only files are not direct-*video*-playable in this sense; callers
+    already skip clip extraction for non-video suffixes, so this is only
+    consulted for video sources.
+    """
+    import json as _json
+    import shutil
+
+    # Locate ffprobe: alongside the bundled ffmpeg first, else PATH.
+    ffprobe = "ffprobe"
+    try:
+        from videoflow.chapters import _find_ffmpeg
+        ff = _find_ffmpeg()
+        cand = Path(ff).with_name("ffprobe" + Path(ff).suffix)
+        if cand.exists():
+            ffprobe = str(cand)
+        elif shutil.which("ffprobe"):
+            ffprobe = shutil.which("ffprobe")
+    except Exception:
+        if shutil.which("ffprobe"):
+            ffprobe = shutil.which("ffprobe")
+
+    try:
+        proc = subprocess.run(
+            [ffprobe, "-v", "quiet", "-print_format", "json",
+             "-show_streams", str(media_path)],
+            capture_output=True, text=True, timeout=30, creationflags=_NO_WINDOW,
+        )
+        data = _json.loads(proc.stdout or "{}")
+    except Exception:
+        return False  # can't tell → extract clips (safe default)
+
+    vstream = next(
+        (s for s in (data.get("streams") or []) if s.get("codec_type") == "video"),
+        None,
+    )
+    if vstream is None:
+        return False
+
+    codec = (vstream.get("codec_name") or "").lower()
+    pix_fmt = (vstream.get("pix_fmt") or "").lower()
+    profile = (vstream.get("profile") or "").lower()
+    width = vstream.get("width") or 0
+    transfer = (vstream.get("color_transfer") or "").lower()
+    primaries = (vstream.get("color_primaries") or "").lower()
+    avg = vstream.get("avg_frame_rate") or ""
+    rrate = vstream.get("r_frame_rate") or ""
+
+    if codec != "h264":
+        return False
+    if pix_fmt and pix_fmt != "yuv420p":
+        return False
+    if any(tok in profile for tok in ("10", "422", "444")):
+        return False
+    if width and width > 1920:
+        return False
+    if transfer in ("smpte2084", "arib-std-b67") or primaries == "bt2020":
+        return False
+    if not (avg and rrate and avg == rrate):  # VFR (or unknown) → not safe
+        return False
+    return True
+
+
 def chapter_clips_dir(media_path: str | Path) -> Path:
     """Return the chapter-clip cache directory for *media_path*.
 

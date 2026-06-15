@@ -51,6 +51,7 @@ from videoflow.audio_spectrogram import (
 from videoflow.chapter_clips import (
     chapter_clip_path as _clip_path,
     extract_chapter_clip as _extract_clip,
+    is_direct_playable as _is_direct_playable,
 )
 from videoflow.chapters import Chapter
 from videoflow.stanzas import Stanza, classify_stanzas as _classify_stanzas
@@ -454,10 +455,15 @@ def auto_chapter(
                     with reporter.stage(_name):
                         reporter.complete(summary="cached (resume)")
                 if media_path.suffix.lower() in _VIDEO_SUFFIXES:
-                    with reporter.stage("chapter_clips"):
-                        _extract_chapter_clips(
-                            media_path, chapters, reporter, _progress,
-                        )
+                    if _is_direct_playable(media_path):
+                        with reporter.stage("chapter_clips"):
+                            _progress("Source streams directly — skipping clip extraction")
+                            reporter.complete(summary="skipped (direct-play)")
+                    else:
+                        with reporter.stage("chapter_clips"):
+                            _extract_chapter_clips(
+                                media_path, chapters, reporter, _progress,
+                            )
                 reporter.complete(
                     summary=f"{len(chapters)} chapters (resumed)",
                 )
@@ -673,12 +679,21 @@ def auto_chapter(
                 #
                 # Only meaningful for video sources — audio-only files
                 # skip the extraction entirely (the original file is
-                # already playable directly).
+                # already playable directly). AND skip when the source is
+                # direct-playable: the editor streams it whole via asset://
+                # (single-file streaming), so per-chapter clips would just be
+                # wasted work + disk. Only non-friendly sources (long high-
+                # bitrate / 4K / VFR / HDR) still get the normalizing clips.
                 if media_path.suffix.lower() in _VIDEO_SUFFIXES:
-                    with reporter.stage("chapter_clips"):
-                        _extract_chapter_clips(
-                            media_path, chapters, reporter, _progress,
-                        )
+                    if _is_direct_playable(media_path):
+                        with reporter.stage("chapter_clips"):
+                            _progress("Source streams directly — skipping clip extraction")
+                            reporter.complete(summary="skipped (direct-play)")
+                    else:
+                        with reporter.stage("chapter_clips"):
+                            _extract_chapter_clips(
+                                media_path, chapters, reporter, _progress,
+                            )
         finally:
             if _tmp is not None:
                 Path(_tmp).unlink(missing_ok=True)
