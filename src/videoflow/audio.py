@@ -628,6 +628,70 @@ def _correct_tempo_octave(
     return bpm, beats_ms, energy
 
 
+# The mirror failure mode: PLP can lock onto *half* the felt pulse — marking
+# only every-other beat, so the grid comes out sparse (wide, evenly-spaced
+# ticks no matter how fast the music actually is). The octave-DOWN guard above
+# never catches it (the reported BPM is already low). We rescue it by lifting
+# back up, but only when an independent estimator confirms the felt tempo is
+# really ~2x our spacing — the autocorrelation tempo (librosa.feature.tempo,
+# 120-BPM prior) reads the perceptual pulse and resists the same octave error.
+# Validated on Euphoria2's outro: free-run PLP locks to 65 BPM (929 ms beats)
+# while the body and the autocorrelation reference both sit at ~129 BPM; a
+# clean 1.99 ratio triggers midpoint insertion back to 129.
+_TEMPO_HALVING_MIN_RATIO = 1.7  # ref/bpm below this isn't a clean halving
+_TEMPO_HALVING_MAX_RATIO = 2.3  # …above this either (genuine slow section)
+
+
+def _correct_tempo_halving(
+    bpm: float,
+    beats_ms: list[int],
+    energy: list[float],
+    ref_bpm: float | None,
+    *,
+    ceiling: float = _TEMPO_OCTAVE_CEILING,
+) -> tuple[float, list[int], list[float]]:
+    """Lift a halved tempo octave back up toward the felt pulse.
+
+    The mirror of :func:`_correct_tempo_octave`. When ``ref_bpm`` (an
+    independent autocorrelation tempo) reads a clean ~2x our detected
+    ``bpm``, PLP almost certainly locked onto half the felt pulse, so we
+    split each half-tempo gap by inserting its midpoint beat — returning the
+    grid to the felt pulse. Returns ``(bpm, beats, energy)`` unchanged unless
+    that clean 2:1 holds *and* the lifted tempo stays at or below ``ceiling``
+    (so a genuinely fast track is left alone, and we never lift into the
+    octave-down guard's territory). Only gaps at least 1.5x the lifted period
+    are split, so a chunk that is only partly half-tracked keeps its already-
+    correct beats. Inserted off-beats get the mean energy of their neighbours
+    and ``energy`` stays index-aligned with ``beats`` throughout.
+    """
+    if (
+        not ref_bpm
+        or bpm <= 0
+        or len(beats_ms) < 4
+        or bpm * 2.0 > ceiling
+    ):
+        return bpm, beats_ms, energy
+    ratio = ref_bpm / bpm
+    if ratio < _TEMPO_HALVING_MIN_RATIO or ratio > _TEMPO_HALVING_MAX_RATIO:
+        return bpm, beats_ms, energy
+
+    target = 60_000.0 / (bpm * 2.0)  # beat period at the lifted tempo
+    have_energy = bool(energy) and len(energy) == len(beats_ms)
+    new_beats: list[int] = []
+    new_energy: list[float] = []
+    for i, b in enumerate(beats_ms):
+        new_beats.append(b)
+        if have_energy:
+            new_energy.append(energy[i])
+        if i + 1 < len(beats_ms):
+            gap = beats_ms[i + 1] - b
+            if gap >= target * 1.5:  # a half-tempo gap → split it
+                new_beats.append((b + beats_ms[i + 1]) // 2)
+                if have_energy:
+                    new_energy.append((energy[i] + energy[i + 1]) / 2.0)
+    return bpm * 2.0, new_beats, (new_energy if have_energy else energy)
+
+
 # ---------------------------------------------------------------------------
 # Internal — per-buffer analysis core
 # ---------------------------------------------------------------------------
@@ -658,9 +722,17 @@ def _analyze_buffer(
             "plp" if duration_ms > PLP_AUTO_DURATION_MS else "beat_track"
         )
 
+    # Independent reference tempo for the octave-halving rescue (PLP path
+    # only). Stays None when the tempo is pinned or the tracker is beat_track
+    # (whose global-DP + start_bpm prior rarely half-locks).
+    ref_bpm: float | None = None
     if resolved_tracker == "plp":
         progress("Detecting beats (PLP — long-form stable)…")
-        plp_kwargs: dict = {"y": y_track, "sr": sr}
+        # Compute the onset envelope once and feed it to BOTH plp and the
+        # autocorrelation tempo estimate, so the reference reads the exact
+        # signal PLP tracked (and we don't pay onset_strength twice).
+        onset_env = _librosa.onset.onset_strength(y=y_track, sr=sr)
+        plp_kwargs: dict = {"onset_envelope": onset_env, "sr": sr}
         if locked_bpm is not None:
             plp_kwargs["tempo_min"] = max(1.0, locked_bpm - 2.0)
             plp_kwargs["tempo_max"] = locked_bpm + 2.0
@@ -680,6 +752,17 @@ def _analyze_buffer(
             bpm = 60_000.0 / median_delta if median_delta > 0 else 0.0
         else:
             bpm = 0.0
+        # 120-prior autocorrelation tempo — perceptual pulse, resists PLP's
+        # octave error. Only needed for the free-run halving rescue below.
+        if locked_bpm is None:
+            try:
+                ref_bpm = float(
+                    _np.atleast_1d(
+                        _librosa.feature.tempo(onset_envelope=onset_env, sr=sr)
+                    )[0]
+                )
+            except Exception:
+                ref_bpm = None
     else:
         progress("Detecting beats (beat_track)…")
         bt_kwargs: dict = {"y": y_track, "sr": sr}
@@ -705,11 +788,17 @@ def _analyze_buffer(
     max_e = max(energy_raw) if energy_raw else 1.0
     energy = [e / max_e if max_e > 0 else 0.0 for e in energy_raw]
 
-    # Correct a doubled tempo octave before deriving downbeats / stanzas, so
+    # Correct a tempo octave before deriving downbeats / stanzas, so
     # everything downstream is built on the felt pulse. Skipped when the BPM
-    # is pinned (the caller asserted the tempo) — see _correct_tempo_octave.
+    # is pinned (the caller asserted the tempo). Fold a doubled octave back
+    # DOWN, then lift a halved octave back UP (mirror failure mode — PLP
+    # marking only every-other beat); ref_bpm gates the lift so a genuinely
+    # slow section is left alone. See _correct_tempo_octave / _halving.
     if locked_bpm is None:
         bpm, beats_ms, energy = _correct_tempo_octave(bpm, beats_ms, energy)
+        bpm, beats_ms, energy = _correct_tempo_halving(
+            bpm, beats_ms, energy, ref_bpm,
+        )
 
     downbeats_ms = beats_ms[::4]
 

@@ -981,5 +981,85 @@ class TestTempoOctaveCorrection(unittest.TestCase):
         self.assertEqual(b, [0, 250])
 
 
+class TestTempoHalvingCorrection(unittest.TestCase):
+    """The mirror guard — lifts a halved tempo back up by inserting midpoint
+    beats, but only when an independent reference tempo confirms the felt
+    pulse is ~2x the detected spacing. Pure function, no librosa.
+
+    Validated on Euphoria2's outro: free-run PLP locks to 65 BPM (929 ms
+    beats) while the autocorrelation reference reads ~129 BPM; the clean 1.99
+    ratio triggers a lift back to 129.
+    """
+
+    def setUp(self):
+        from videoflow.audio import _correct_tempo_halving
+        self.lift = _correct_tempo_halving
+
+    def _beats(self, n, interval):
+        return [i * interval for i in range(n)]
+
+    def test_halved_tempo_is_lifted(self):
+        # 65 BPM grid (≈923 ms), ref says ~130 → midpoints inserted → 130.
+        beats = self._beats(8, 923)
+        energy = [1.0] * 8
+        bpm, b, e = self.lift(65.0, beats, energy, ref_bpm=129.2)
+        self.assertAlmostEqual(bpm, 130.0)
+        self.assertEqual(len(b), 15)            # 8 + 7 inserted midpoints
+        self.assertEqual(len(e), len(b))        # stays index-aligned
+        # a midpoint landed halfway into the first gap
+        self.assertEqual(b[1], (beats[0] + beats[1]) // 2)
+
+    def test_no_reference_is_noop(self):
+        beats = self._beats(8, 923)
+        bpm, b, e = self.lift(65.0, beats, [1.0] * 8, ref_bpm=None)
+        self.assertEqual(bpm, 65.0)
+        self.assertEqual(b, beats)
+
+    def test_matching_reference_untouched(self):
+        # ref ≈ bpm → already on the felt pulse → no lift.
+        beats = self._beats(8, 465)
+        bpm, b, _e = self.lift(129.0, beats, [1.0] * 8, ref_bpm=129.2)
+        self.assertEqual(bpm, 129.0)
+        self.assertEqual(b, beats)
+
+    def test_partial_ratio_not_lifted(self):
+        # ref/bpm = 1.4 isn't a clean 2:1 (genuine slow section) → left alone.
+        beats = self._beats(8, 600)
+        bpm, b, _e = self.lift(90.0, beats, [1.0] * 8, ref_bpm=126.0)
+        self.assertEqual(bpm, 90.0)
+        self.assertEqual(b, beats)
+
+    def test_lift_past_ceiling_blocked(self):
+        # Lifting would exceed the octave ceiling (90*2=180 > 165) → no-op,
+        # so we never lift a track into the octave-down guard's territory.
+        beats = self._beats(8, 667)
+        bpm, b, _e = self.lift(90.0, beats, [1.0] * 8, ref_bpm=180.0)
+        self.assertEqual(bpm, 90.0)
+        self.assertEqual(b, beats)
+
+    def test_only_wide_gaps_split(self):
+        # A partly half-tracked chunk: first half already correct (≈465 ms),
+        # second half doubled (≈930 ms). Only the wide gaps get a midpoint.
+        beats = [0, 465, 930, 1395, 2325, 3255]  # last two gaps are ~930
+        bpm, b, _e = self.lift(65.0, beats, [1.0] * len(beats), ref_bpm=129.2)
+        self.assertAlmostEqual(bpm, 130.0)
+        # the two wide gaps each gained one midpoint; the narrow ones didn't
+        self.assertEqual(len(b), len(beats) + 2)
+        self.assertIn((1395 + 2325) // 2, b)
+
+    def test_inserted_energy_is_neighbour_mean(self):
+        beats = self._beats(4, 923)
+        energy = [1.0, 0.0, 1.0, 0.0]
+        _bpm, b, e = self.lift(65.0, beats, energy, ref_bpm=129.2)
+        # first inserted off-beat sits between energy 1.0 and 0.0 → 0.5
+        self.assertEqual(b[1], (beats[0] + beats[1]) // 2)
+        self.assertAlmostEqual(e[1], 0.5)
+
+    def test_too_few_beats_not_lifted(self):
+        bpm, b, _e = self.lift(65.0, [0, 923], [1.0, 1.0], ref_bpm=129.2)
+        self.assertEqual(bpm, 65.0)
+        self.assertEqual(b, [0, 923])
+
+
 if __name__ == "__main__":
     unittest.main()
