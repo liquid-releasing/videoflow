@@ -287,6 +287,7 @@ def _normalise(doc: dict[str, Any], *, source: str) -> dict[str, Any]:
     if not isinstance(chapters, list):
         raise SidecarError(f"{source}: 'chapters' must be a list")
     for i, ch in enumerate(chapters):
+        _coerce_legacy_tone(ch)
         _validate_chapter(ch, source=source, idx=i)
         if legacy_user_edited and isinstance(ch, dict) and "auto_generated" not in ch:
             ch["auto_generated"] = False
@@ -296,6 +297,7 @@ def _normalise(doc: dict[str, Any], *, source: str) -> dict[str, Any]:
     if not isinstance(stanzas, list):
         raise SidecarError(f"{source}: 'stanzas' must be a list")
     for i, ph in enumerate(stanzas):
+        _coerce_legacy_tone(ph)
         _validate_stanza(ph, source=source, idx=i)
         if legacy_user_edited and isinstance(ph, dict) and "auto_generated" not in ph:
             ph["auto_generated"] = False
@@ -315,6 +317,19 @@ def _normalise(doc: dict[str, Any], *, source: str) -> dict[str, Any]:
     out["provenance"] = provenance
 
     return out
+
+
+def _coerce_legacy_tone(rec: Any) -> None:
+    """FunscriptForge persists a UI-only ``tone: "none"`` (Untoned) sentinel
+    that has no videoflow counterpart — its canonical untoned value is ``""``.
+    Map ``"none"`` → ``""`` in place so an FF-authored sidecar survives a
+    round-trip through an analyze write (which re-reads + re-validates the
+    existing doc). Both read_sidecar and write_sidecar route through
+    _normalise, so this covers the on-disk doc AND the incoming payload.
+    Mirrors the legacy ``content_type`` "accepted on write, mapped on read"
+    policy above."""
+    if isinstance(rec, dict) and rec.get("tone") == "none":
+        rec["tone"] = ""
 
 
 def _validate_chapter(ch: Any, *, source: str, idx: int) -> None:
