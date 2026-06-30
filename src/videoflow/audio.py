@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from videoflow.descreech import descreech
 from videoflow.progress import OnProgress, ProgressReporter
 
 _nullcontext = contextlib.nullcontext
@@ -75,6 +76,11 @@ class AudioBeatMap:
     rest of the track has no analysis. Drives a user-facing 'damaged audio'
     warning so a short/sparse result on a broken source isn't a surprise.
     ``None`` for healthy sources."""
+
+    screech_regions: list[dict] | None = None
+    """Clipped/screech spans the de-screech pass tamed before analysis, each
+    ``{start_s, end_s, peak_amp, max_gr_db}``. Drives the sidecar report and
+    the funscript-viewer timeline markers. ``None`` when the source was clean."""
 
     @property
     def beat_interval_ms(self) -> float:
@@ -427,6 +433,9 @@ def analyze_beats(
         # Set when a corrupt-audio salvage truncated the clean head; stamped
         # onto the returned beat map so consumers can warn the user.
         _damaged_after_ms = None
+        # Clipped/screech regions tamed by the de-screech pass (for the sidecar
+        # report + funscript-viewer markers). See screech_safety_architecture.md.
+        _screech_regions: list[dict] = []
         if input.suffix.lower() in _VIDEO_SUFFIXES:
             with reporter.stage("extract"):
                 _progress("Extracting audio from video (ffmpeg)…")
@@ -474,6 +483,15 @@ def analyze_beats(
             with reporter.stage("load"):
                 _progress("Loading audio (librosa)…")
                 y, sr_ = _librosa.load(load_path, sr=sr, mono=True)
+                # De-screech: tame clipped/overdriven spikes before any feature
+                # extraction so a source glitch can't become a spurious
+                # max-intensity beat (and a painful e-stim flash downstream).
+                y, _regions = descreech(y, sr_)
+                _screech_regions = [r.as_dict() for r in _regions]
+                if _screech_regions:
+                    _progress(
+                        f"De-screeched {len(_screech_regions)} clipped region(s)…"
+                    )
                 duration_ms = round(_librosa.get_duration(y=y, sr=sr_) * 1000)
                 reporter.complete(
                     summary=f"{duration_ms / 1000:.1f}s @ {sr_} Hz mono",
@@ -575,6 +593,7 @@ def analyze_beats(
         energy=energy,
         duration_ms=duration_ms,
         damaged_after_ms=_damaged_after_ms,
+        screech_regions=_screech_regions or None,
     )
 
 
