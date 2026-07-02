@@ -186,6 +186,31 @@ def _probe_video_dimensions(
     return int(match.group(1)), int(match.group(2))
 
 
+def _fps_to_float(fr: str) -> float:
+    """Parse an ffprobe frame-rate ('30/1', '2080658801/69461181', '29.97') to
+    float; 0.0 on anything unparseable or a zero denominator."""
+    try:
+        if "/" in fr:
+            n, d = fr.split("/", 1)
+            d = float(d)
+            return float(n) / d if d else 0.0
+        return float(fr)
+    except (ValueError, ZeroDivisionError):
+        return 0.0
+
+
+# Near-CFR tolerance: HandBrake / x264 report avg_frame_rate a hair below the
+# nominal r_frame_rate (avg = frames ÷ duration), e.g. 29.955 vs 30 — that's
+# effectively CFR and plays fine. True VFR diverges far more. 1% of nominal.
+# MUST stay in sync with funscriptforge cli.py::_is_cfr.
+_CFR_FPS_TOLERANCE = 0.01
+
+
+def _is_cfr(avg: str, rrate: str) -> bool:
+    a, r = _fps_to_float(avg), _fps_to_float(rrate)
+    return a > 0 and r > 0 and abs(a - r) <= _CFR_FPS_TOLERANCE * r
+
+
 def is_direct_playable(media_path: str | Path) -> bool:
     """True when the source streams cleanly into an embedded Chromium <video>
     via asset:// WITHOUT a normalizing re-encode — so the per-chapter clip
@@ -257,7 +282,7 @@ def is_direct_playable(media_path: str | Path) -> bool:
         return False
     if transfer in ("smpte2084", "arib-std-b67") or primaries == "bt2020":
         return False
-    if not (avg and rrate and avg == rrate):  # VFR (or unknown) → not safe
+    if not _is_cfr(avg, rrate):  # true VFR (or unknown) → not safe; near-CFR OK
         return False
     return True
 

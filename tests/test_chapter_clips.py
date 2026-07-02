@@ -11,6 +11,7 @@ from videoflow.chapter_clips import (
     FFMPEG_CLIP_ARGS,
     FFMPEG_CLIP_ARGS_4K_DOWNSCALE,
     _PROBE_RESOLUTION_RE,
+    _is_cfr,
     _probe_video_dimensions,
 )
 
@@ -139,6 +140,27 @@ class TestDownscaleArgs(unittest.TestCase):
 
     def test_cache_version_bumped_to_v12(self):
         self.assertEqual(CACHE_VERSION, "v12")
+
+
+class TestCfrTolerance(unittest.TestCase):
+    """Near-CFR sources (HandBrake reports avg fps a hair below nominal) count
+    as CFR so they skip the clip pipeline; true VFR still triggers clips."""
+
+    def test_handbrake_near_cfr_counts_as_cfr(self):
+        # Real ddt470.720: r=30, avg=2080658801/69461181 ≈ 29.954.
+        self.assertTrue(_is_cfr("2080658801/69461181", "30/1"))
+
+    def test_exact_rates_are_cfr(self):
+        self.assertTrue(_is_cfr("30/1", "30/1"))
+        self.assertTrue(_is_cfr("24000/1001", "24000/1001"))  # 23.976
+
+    def test_true_vfr_is_not_cfr(self):
+        self.assertFalse(_is_cfr("30/1", "15/1"))   # far apart
+        self.assertFalse(_is_cfr("60/1", "30/1"))
+
+    def test_unknown_or_empty_is_not_cfr(self):
+        self.assertFalse(_is_cfr("", ""))
+        self.assertFalse(_is_cfr("30/0", "30/1"))   # zero denominator
 
 
 if __name__ == "__main__":
