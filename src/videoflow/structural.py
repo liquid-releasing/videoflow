@@ -716,11 +716,24 @@ def _prepare_audio(
     """Return ``(load_path, tmp_path_or_None)``.
 
     For audio files, returns the source path directly. For video files,
-    extracts a mono WAV via ffmpeg and returns the temp path; caller is
-    responsible for unlinking it.
+    returns a mono WAV extracted via ffmpeg.
+
+    The second element is the path the caller must unlink when done — and it
+    is ``None`` whenever the WAV came from (or was published to) the shared
+    :mod:`videoflow.audio_cache`. Cached extractions outlive the run that
+    produced them so a following stage (or a following *process* — generation
+    then analysis) can reuse the decode; their lifetime belongs to the
+    ``forge-audio`` temp sweep, not to this caller's ``finally``.
     """
     if media_path.suffix.lower() not in _VIDEO_SUFFIXES:
         return str(media_path), None
+
+    from videoflow import audio_cache
+    hit = audio_cache.lookup(media_path, sr)
+    if hit is not None:
+        cached_path, _damaged = hit
+        progress("Reusing extracted audio (cached)…")
+        return cached_path, None
 
     progress("Extracting audio from video (ffmpeg)…")
     ffmpeg = "ffmpeg"
@@ -736,27 +749,32 @@ def _prepare_audio(
 
     # Reclaim WAVs orphaned by previously-killed runs (a kill bypasses the
     # caller's cleanup finally), then extract into the same dedicated dir.
-    from videoflow.tempfiles import audio_temp_dir, sweep_audio_temp
+    from videoflow.tempfiles import sweep_audio_temp
     sweep_audio_temp()
-    tmp = tempfile.NamedTemporaryFile(
-        suffix=".wav", delete=False, dir=str(audio_temp_dir()),
-    )
-    tmp.close()
+    staging = audio_cache.new_staging_path()
     try:
         rc, _damaged_ms = _run_ffmpeg_with_progress(
-            ffmpeg, media_path, tmp.name, sr=sr, progress=progress,
+            ffmpeg, media_path, staging, sr=sr, progress=progress,
         )
         if rc != 0:
-            Path(tmp.name).unlink(missing_ok=True)
+            Path(staging).unlink(missing_ok=True)
             raise AutoChapterError(f"FFmpeg audio extraction failed (exit {rc})")
     except FileNotFoundError:
-        Path(tmp.name).unlink(missing_ok=True)
+        Path(staging).unlink(missing_ok=True)
         raise AutoChapterError(
             "FFmpeg is required to extract audio from video files. "
             "Install it from https://ffmpeg.org/download.html — "
             "or place ffmpeg.exe alongside videoflow."
         )
-    return tmp.name, tmp.name
+    # Publish atomically so a later stage/process reuses this decode. On a
+    # publish failure we still hold a perfectly good scratch WAV — hand it
+    # back as the caller-owned temp so the run proceeds (just uncached).
+    published = audio_cache.publish(
+        staging, media_path, sr, damaged_after_ms=_damaged_ms,
+    )
+    if audio_cache.is_cached_path(published):
+        return published, None
+    return published, published
 
 
 def _format_extract_timestamp(out_time_us: int) -> str:

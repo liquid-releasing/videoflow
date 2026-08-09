@@ -7,7 +7,6 @@ import dataclasses
 import json
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -424,7 +423,7 @@ def analyze_beats(
     # Reclaim temp WAVs orphaned by previously-killed analyses — a kill
     # bypasses the finally that normally unlinks them, so they pile up and
     # silently fill the user's disk. Cheap (one dir scan); runs each call.
-    from videoflow.tempfiles import audio_temp_dir, sweep_audio_temp
+    from videoflow.tempfiles import sweep_audio_temp
     sweep_audio_temp()
 
     with reporter.stage("audio.analyze"):
@@ -438,44 +437,59 @@ def analyze_beats(
         _screech_regions: list[dict] = []
         if input.suffix.lower() in _VIDEO_SUFFIXES:
             with reporter.stage("extract"):
-                _progress("Extracting audio from video (ffmpeg)…")
-                # Look for ffmpeg on PATH, then alongside this file, then alongside the input file.
-                _ffmpeg = "ffmpeg"
-                for _candidate in [
-                    Path(__file__).parent / "ffmpeg.exe",
-                    Path(__file__).parent / "ffmpeg",
-                    input.parent / "ffmpeg.exe",
-                    input.parent / "ffmpeg",
-                ]:
-                    if _candidate.is_file():
-                        _ffmpeg = str(_candidate)
-                        break
+                # One decode per source: chapter analysis and generation share
+                # the extracted WAV through audio_cache, so landing on Analysis
+                # right after a Generate no longer re-extracts the same track
+                # (bug D22). A cache hit also carries the damaged-audio salvage
+                # marker, so the "audio is damaged after MM:SS" warning survives.
+                from videoflow import audio_cache
+                _hit = audio_cache.lookup(input, sr)
+                if _hit is not None:
+                    load_path, _damaged_after_ms = _hit
+                    _progress("Reusing extracted audio (cached)…")
+                    reporter.complete(summary="reused cached wav")
+                else:
+                    _progress("Extracting audio from video (ffmpeg)…")
+                    # Look for ffmpeg on PATH, then alongside this file, then alongside the input file.
+                    _ffmpeg = "ffmpeg"
+                    for _candidate in [
+                        Path(__file__).parent / "ffmpeg.exe",
+                        Path(__file__).parent / "ffmpeg",
+                        input.parent / "ffmpeg.exe",
+                        input.parent / "ffmpeg",
+                    ]:
+                        if _candidate.is_file():
+                            _ffmpeg = str(_candidate)
+                            break
 
-                _tmp_audio = tempfile.NamedTemporaryFile(
-                    suffix=".wav", delete=False, dir=str(audio_temp_dir()),
-                )
-                _tmp_audio.close()
-                try:
-                    # Lazy import to avoid hoisting structural's heavy deps
-                    # (numpy, librosa transitively) into audio.py's import
-                    # graph for the non-extracting code paths.
-                    from videoflow.structural import _run_ffmpeg_with_progress
-                    _rc, _damaged_after_ms = _run_ffmpeg_with_progress(
-                        _ffmpeg, input, _tmp_audio.name,
-                        sr=sr, progress=_progress,
+                    _staging = audio_cache.new_staging_path()
+                    try:
+                        # Lazy import to avoid hoisting structural's heavy deps
+                        # (numpy, librosa transitively) into audio.py's import
+                        # graph for the non-extracting code paths.
+                        from videoflow.structural import _run_ffmpeg_with_progress
+                        _rc, _damaged_after_ms = _run_ffmpeg_with_progress(
+                            _ffmpeg, input, _staging,
+                            sr=sr, progress=_progress,
+                        )
+                        if _rc != 0:
+                            Path(_staging).unlink(missing_ok=True)
+                            raise BeatError(f"FFmpeg audio extraction failed (exit {_rc})")
+                    except FileNotFoundError:
+                        Path(_staging).unlink(missing_ok=True)
+                        raise BeatError(
+                            "FFmpeg is required to extract audio from video files. "
+                            "Install it from https://ffmpeg.org/download.html — "
+                            "or place ffmpeg.exe in the forgegen folder."
+                        )
+                    load_path = audio_cache.publish(
+                        _staging, input, sr, damaged_after_ms=_damaged_after_ms,
                     )
-                    if _rc != 0:
-                        Path(_tmp_audio.name).unlink(missing_ok=True)
-                        raise BeatError(f"FFmpeg audio extraction failed (exit {_rc})")
-                except FileNotFoundError:
-                    Path(_tmp_audio.name).unlink(missing_ok=True)
-                    raise BeatError(
-                        "FFmpeg is required to extract audio from video files. "
-                        "Install it from https://ffmpeg.org/download.html — "
-                        "or place ffmpeg.exe in the forgegen folder."
-                    )
-                load_path = _tmp_audio.name
-                reporter.complete(summary="audio extracted to wav")
+                    # Only a non-published (scratch) WAV is ours to unlink; a
+                    # cache slot must outlive this run for the next stage.
+                    if not audio_cache.is_cached_path(load_path):
+                        _tmp_audio = load_path
+                    reporter.complete(summary="audio extracted to wav")
         else:
             load_path = str(input)
 
@@ -575,8 +589,10 @@ def analyze_beats(
         except Exception as exc:
             raise BeatError(f"Beat analysis failed: {exc}") from exc
         finally:
+            # Set only for a scratch (unpublished) extraction — a cache slot is
+            # owned by the forge-audio sweep and is deliberately left in place.
             if _tmp_audio is not None:
-                Path(_tmp_audio.name).unlink(missing_ok=True)
+                Path(_tmp_audio).unlink(missing_ok=True)
 
         reporter.complete(
             summary=(
