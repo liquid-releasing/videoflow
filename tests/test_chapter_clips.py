@@ -141,8 +141,32 @@ class TestDownscaleArgs(unittest.TestCase):
         crf_idx = args.index("-crf")
         self.assertEqual(args[crf_idx + 1], "23")
 
-    def test_cache_version_bumped_to_v12(self):
-        self.assertEqual(CACHE_VERSION, "v12")
+    def test_cache_version_bumped_to_v13(self):
+        self.assertEqual(CACHE_VERSION, "v13")
+
+    def test_both_paths_use_veryfast(self):
+        """`ultrafast` bought almost no speed and paid ~2x the bytes (D35).
+
+        These encodes are dominated by source I/O and scaling, not by x264's
+        tools, so disabling the tools was close to pure loss. Guard both arg
+        sets — the Rust mirror in commands.rs must match verbatim or the two
+        paths write different bytes under the same cache key.
+        """
+        for args in (FFMPEG_CLIP_ARGS, FFMPEG_CLIP_ARGS_4K_DOWNSCALE):
+            self.assertEqual(args[args.index("-preset") + 1], "veryfast")
+
+    def test_crfs_are_unchanged_by_the_preset_switch(self):
+        """The v13 change is preset-only; CRF carries the quality contract
+        (20 on the downscale path protects graded-source iris coloring)."""
+        self.assertEqual(
+            FFMPEG_CLIP_ARGS[FFMPEG_CLIP_ARGS.index("-crf") + 1], "23",
+        )
+        self.assertEqual(
+            FFMPEG_CLIP_ARGS_4K_DOWNSCALE[
+                FFMPEG_CLIP_ARGS_4K_DOWNSCALE.index("-crf") + 1
+            ],
+            "20",
+        )
 
 
 class TestCfrTolerance(unittest.TestCase):

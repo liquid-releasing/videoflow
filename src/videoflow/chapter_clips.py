@@ -50,7 +50,18 @@ from typing import Callable, Iterable
 # tonemap-less conversion to BT.709 — acceptable for editor preview
 # since the funscript output is colour-agnostic. SDR (≤1920px) keeps
 # the v11 args verbatim.
-CACHE_VERSION = "v12"
+# v13: `-preset ultrafast` → `veryfast` on BOTH paths. ultrafast disables
+# nearly all of x264's compression tools, and on these sources the encode is
+# dominated by source I/O and scaling rather than by those tools — so it was
+# buying almost no speed while paying ~2x the bytes. Measured on a 60s slice
+# (2026-08-09): 2560×1440→720p 119.9MB/6.5s → 73.2MB/7.8s; 1920×1080 SDR
+# 78.0MB/4.0s → 36.8MB/4.9s. CRFs are unchanged (23 SDR / 20 downscale), so
+# quality headroom — including the graded-source iris coloring the downscale
+# path exists to protect — is preserved or better at a lower bitrate.
+# NOTE this is ~20% MORE encode time; it is a size/quality change, not a
+# speed one. The wall-clock lever is skipping extraction entirely
+# (direct-play / a single whole-file proxy), not the preset.
+CACHE_VERSION = "v13"
 
 # ffmpeg encode args. Match the Rust command verbatim — frontend's Rust
 # fallback must produce identical output for a given (media, start, end).
@@ -76,7 +87,7 @@ FFMPEG_CLIP_ARGS: tuple[str, ...] = (
     "-c:v", "libx264",
     "-profile:v", "baseline",
     "-level", "3.1",
-    "-preset", "ultrafast",
+    "-preset", "veryfast",
     "-crf", "23",
     "-pix_fmt", "yuv420p",
     "-r", "30",
@@ -113,7 +124,7 @@ FFMPEG_CLIP_ARGS_4K_DOWNSCALE: tuple[str, ...] = (
     "-c:v", "libx264",
     "-profile:v", "baseline",
     "-level", "3.1",
-    "-preset", "ultrafast",
+    "-preset", "veryfast",
     "-crf", "20",
     "-pix_fmt", "yuv420p",
     "-r", "30",
