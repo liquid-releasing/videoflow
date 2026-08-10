@@ -149,6 +149,24 @@ FFMPEG_CLIP_ARGS_4K_DOWNSCALE: tuple[str, ...] = (
 # args verbatim — they don't need the downscale.
 DOWNSCALE_WIDTH_THRESHOLD: int = 1920
 
+# Widest source WebView2 is trusted to stream raw (see is_direct_playable).
+# Above this we pre-extract 720p chapter clips instead. Mirrored in
+# funscriptforge cli.py ``DIRECT_PLAY_MAX_WIDTH`` — the two must agree, or
+# analysis and playback disagree about whether clips exist for a source.
+#
+# Was 1920 (≤1080p). Raised to 2560 so 1440p / 2.5K streams directly rather
+# than paying a full transcode per chapter — on a 2560×1440 source that was
+# minutes of ffmpeg per analysis (D32), and skipping extraction is the only
+# thing that takes it to zero. 1440p is ~2.4× 1080p's pixels where 4K is ~4×,
+# so it sits on the near side of the decode cliff the original gate targeted.
+# True 4K (3840) and up still clip.
+#
+# This is the ONE value to revert if 1440p playback stutters or OOMs in
+# WebView2 — set it back to 1920 and the previous behaviour returns exactly.
+# Note it is INDEPENDENT of DOWNSCALE_WIDTH_THRESHOLD above: that one decides
+# how a clip is encoded once we've decided to make one.
+DIRECT_PLAY_MAX_WIDTH: int = 2560
+
 # Default extension when the source doesn't carry one. mp4 is what
 # Chromium plays best and what every editor input is converted to.
 _DEFAULT_EXT = "mp4"
@@ -293,7 +311,7 @@ def is_direct_playable(media_path: str | Path) -> bool:
         return False
     if any(tok in profile for tok in ("10", "422", "444")):
         return False
-    if width and width > 1920:
+    if width and width > DIRECT_PLAY_MAX_WIDTH:
         return False
     if transfer in ("smpte2084", "arib-std-b67") or primaries == "bt2020":
         return False
