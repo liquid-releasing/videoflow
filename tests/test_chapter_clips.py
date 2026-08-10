@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from videoflow.chapter_clips import (
@@ -13,6 +15,7 @@ from videoflow.chapter_clips import (
     _PROBE_RESOLUTION_RE,
     _is_cfr,
     _probe_video_dimensions,
+    _run_ffmpeg_clip,
 )
 
 
@@ -161,6 +164,129 @@ class TestCfrTolerance(unittest.TestCase):
     def test_unknown_or_empty_is_not_cfr(self):
         self.assertFalse(_is_cfr("", ""))
         self.assertFalse(_is_cfr("30/0", "30/1"))   # zero denominator
+
+
+class TestClipProgressReporting(unittest.TestCase):
+    """Within-clip progress (D32).
+
+    A chapter clip is a full re-encode, so on a >1920-wide source a multi-minute
+    chapter is multi-minute ffmpeg. Announcing the clip once and then going
+    silent for that long is what made the app read as frozen.
+    """
+
+    def _fake_run(self, calls):
+        def run(cmd, **kw):
+            calls.append(cmd)
+            class _P:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return _P()
+        return run
+
+    def test_no_callback_leaves_the_command_untouched(self):
+        """The plain path must not grow a -progress file it never reads."""
+        calls: list[list[str]] = []
+        args = ["ffmpeg", "-i", "in.mp4", "out.mp4"]
+        with patch("videoflow.chapter_clips.subprocess.run", self._fake_run(calls)):
+            _run_ffmpeg_clip(args, duration_ms=60_000, on_progress=None)
+        self.assertEqual(calls[0], args)
+        self.assertNotIn("-progress", calls[0])
+
+    def test_zero_duration_falls_back_to_plain_run(self):
+        """Without a duration there is no fraction to report — don't pretend."""
+        calls: list[list[str]] = []
+        args = ["ffmpeg", "-i", "in.mp4", "out.mp4"]
+        with patch("videoflow.chapter_clips.subprocess.run", self._fake_run(calls)):
+            _run_ffmpeg_clip(args, duration_ms=0, on_progress=lambda f: None)
+        self.assertEqual(calls[0], args)
+
+    def test_progress_flags_are_injected_before_the_output_path(self):
+        """ffmpeg takes the output last; flags after it are a parse error."""
+        calls: list[list[str]] = []
+        args = ["ffmpeg", "-i", "in.mp4", "out.mp4"]
+        with patch("videoflow.chapter_clips.subprocess.run", self._fake_run(calls)):
+            _run_ffmpeg_clip(args, duration_ms=60_000, on_progress=lambda f: None)
+        cmd = calls[0]
+        self.assertEqual(cmd[-1], "out.mp4", "output path must stay last")
+        self.assertIn("-progress", cmd)
+        self.assertIn("-nostats", cmd)
+        self.assertLess(cmd.index("-progress"), len(cmd) - 1)
+
+    def test_progress_file_is_cleaned_up(self):
+        calls: list[list[str]] = []
+        args = ["ffmpeg", "-i", "in.mp4", "out.mp4"]
+        with patch("videoflow.chapter_clips.subprocess.run", self._fake_run(calls)):
+            _run_ffmpeg_clip(args, duration_ms=60_000, on_progress=lambda f: None)
+        progress_path = calls[0][calls[0].index("-progress") + 1]
+        self.assertFalse(
+            Path(progress_path).exists(), "temp progress log must not leak",
+        )
+
+    def test_encode_result_is_returned_unchanged(self):
+        calls: list[list[str]] = []
+        args = ["ffmpeg", "-i", "in.mp4", "out.mp4"]
+        with patch("videoflow.chapter_clips.subprocess.run", self._fake_run(calls)):
+            proc = _run_ffmpeg_clip(
+                args, duration_ms=60_000, on_progress=lambda f: None,
+            )
+        self.assertEqual(proc.returncode, 0)
+
+    def test_reported_fractions_are_parsed_and_clamped(self):
+        """Drive the parser directly over ffmpeg's real -progress key."""
+        seen: list[float] = []
+
+        def fake_run(cmd, **kw):
+            path = cmd[cmd.index("-progress") + 1]
+            with open(path, "w", encoding="utf-8") as fh:
+                # 15s, 30s, then a value past the end (ffmpeg overshoots on
+                # the final packet) -> must clamp to 1.0, never exceed it.
+                fh.write("out_time_us=15000000\nout_time_us=30000000\n"
+                         "out_time_us=99000000\n")
+                fh.flush()
+            time.sleep(0.9)  # let the 0.5s poller pick the file up
+            class _P:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return _P()
+
+        with patch("videoflow.chapter_clips.subprocess.run", fake_run):
+            _run_ffmpeg_clip(
+                ["ffmpeg", "-i", "in.mp4", "out.mp4"],
+                duration_ms=60_000,
+                on_progress=seen.append,
+            )
+
+        self.assertTrue(seen, "expected progress callbacks")
+        self.assertLessEqual(max(seen), 1.0, "fraction must clamp at 1.0")
+        self.assertGreaterEqual(min(seen), 0.0)
+        self.assertEqual(seen, sorted(seen), "progress must be monotonic")
+
+    def test_a_raising_callback_cannot_break_the_encode(self):
+        """A consumer's reporting bug must not fail the extraction."""
+        def fake_run(cmd, **kw):
+            path = cmd[cmd.index("-progress") + 1]
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("out_time_us=30000000\n")
+                fh.flush()
+            time.sleep(0.9)
+            class _P:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return _P()
+
+        def boom(_frac):
+            raise RuntimeError("consumer blew up")
+
+        with patch("videoflow.chapter_clips.subprocess.run", fake_run):
+            proc = _run_ffmpeg_clip(
+                ["ffmpeg", "-i", "in.mp4", "out.mp4"],
+                duration_ms=60_000,
+                on_progress=boom,
+            )
+        self.assertEqual(proc.returncode, 0)
 
 
 if __name__ == "__main__":

@@ -18,11 +18,15 @@ in sync. Update both when the args change, and bump
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 
 # Cache version. Mirrors the Rust constant in
@@ -316,6 +320,87 @@ def chapter_clip_path(media_path: str | Path, start_ms: int, end_ms: int) -> Pat
     return chapter_clips_dir(media_path) / name
 
 
+def _run_ffmpeg_clip(
+    args: list[str],
+    *,
+    duration_ms: int,
+    on_progress: "Callable[[float], None] | None",
+) -> subprocess.CompletedProcess:
+    """Run a clip encode, reporting fractional progress while it works.
+
+    A chapter clip is a full re-encode, so on a 2.5K source a 7-minute chapter
+    is minutes of ffmpeg. With a plain blocking ``subprocess.run`` the caller
+    can only announce "extracting clip 3/3…" once and then go silent for the
+    whole encode, which reads as a frozen app (bug D32).
+
+    Progress goes to a temp FILE rather than ``pipe:1`` deliberately: ffmpeg
+    block-flushes stdout pipes and delivers nothing until exit, whereas the
+    file path flushes incrementally. Same technique as
+    ``structural._run_ffmpeg_with_progress``, which documents the finding.
+
+    ``on_progress`` receives a 0.0–1.0 fraction, throttled to whole-percent
+    changes so a long encode doesn't flood the consumer's event stream.
+    Progress reporting is strictly best-effort — any failure inside it leaves
+    the encode itself untouched.
+    """
+    if on_progress is None or duration_ms <= 0:
+        return subprocess.run(
+            args, capture_output=True, text=True, creationflags=_NO_WINDOW,
+        )
+
+    fd, progress_path = tempfile.mkstemp(suffix=".log", prefix="vfclip_")
+    os.close(fd)
+    # `-progress <file> -nostats` goes before the output path.
+    cmd = args[:-1] + ["-progress", progress_path, "-nostats", args[-1]]
+
+    done = threading.Event()
+
+    def _poll():
+        last_pct = -1
+        pos = 0
+        while not done.is_set():
+            try:
+                with open(progress_path, "r", encoding="utf-8", errors="replace") as fh:
+                    fh.seek(pos)
+                    chunk = fh.read()
+                    pos = fh.tell()
+                for line in chunk.splitlines():
+                    if not line.startswith("out_time_us="):
+                        continue
+                    raw = line.split("=", 1)[1].strip()
+                    if not raw or raw == "N/A":
+                        continue
+                    frac = (int(raw) / 1000.0) / duration_ms
+                    frac = max(0.0, min(1.0, frac))
+                    pct = int(frac * 100)
+                    if pct != last_pct:
+                        last_pct = pct
+                        try:
+                            on_progress(frac)
+                        except Exception:
+                            # A consumer's reporting bug must not silently kill
+                            # the poll loop (and with it all further progress).
+                            pass
+            except (OSError, ValueError):
+                pass
+            done.wait(0.5)
+
+    poller = threading.Thread(target=_poll, daemon=True)
+    poller.start()
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, creationflags=_NO_WINDOW,
+        )
+    finally:
+        done.set()
+        poller.join(timeout=2.0)
+        try:
+            os.unlink(progress_path)
+        except OSError:
+            pass
+    return proc
+
+
 def extract_chapter_clip(
     media_path: str | Path,
     start_ms: int,
@@ -323,6 +408,7 @@ def extract_chapter_clip(
     output_path: str | Path | None = None,
     *,
     ffmpeg: str | None = None,
+    on_progress: "Callable[[float], None] | None" = None,
 ) -> Path:
     """Stream-quality re-encode of a chapter slice.
 
@@ -334,6 +420,11 @@ def extract_chapter_clip(
             path :func:`chapter_clip_path` computes.
         ffmpeg: Override the ffmpeg binary path. Defaults to the
             :mod:`videoflow.chapters` lookup (PATH + adjacent binary).
+        on_progress: Optional callback receiving a 0.0–1.0 fraction as the
+            encode advances. A chapter clip can take minutes on a high-res
+            source, so callers use this to keep the UI honest instead of
+            sitting silent for the whole encode (D32). Best-effort: it never
+            affects the encode's success.
 
     Returns:
         The output path. If a clip already exists there, returns the
@@ -402,11 +493,8 @@ def extract_chapter_clip(
         *encode_args,
         str(tmp),
     ]
-    proc = subprocess.run(
-        args,
-        capture_output=True,
-        text=True,
-        creationflags=_NO_WINDOW,
+    proc = _run_ffmpeg_clip(
+        args, duration_ms=end_ms - start_ms, on_progress=on_progress,
     )
     if proc.returncode != 0:
         # Don't leave a partial / zero-byte file behind to poison the cache.

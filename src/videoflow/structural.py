@@ -319,9 +319,23 @@ def _extract_chapter_clips(media_path: Path, chapters, reporter, progress) -> No
         if out.exists():
             cached += 1
         else:
-            progress(f"Extracting chapter clip {i + 1}/{total}…")
+            # A clip is a full re-encode; on a >1920-wide source a multi-minute
+            # chapter is multi-minute ffmpeg. Announcing the clip once and then
+            # going quiet for that long reads as a frozen app (D32), so stream
+            # the encode's own percentage into the same footer line. The clip
+            # length is shown too — it's the honest explanation for the wait.
+            mins = (end_ms - start_ms) / 60000.0
+            label = f"Extracting chapter clip {i + 1}/{total} ({mins:.1f} min)"
+            progress(f"{label}…")
+
+            def _on_clip_progress(frac, _label=label):
+                progress(f"{_label} — {int(frac * 100)}%")
+
             try:
-                _extract_clip(media_path, start_ms, end_ms, out)
+                _extract_clip(
+                    media_path, start_ms, end_ms, out,
+                    on_progress=_on_clip_progress,
+                )
                 built += 1
             except (RuntimeError, FileNotFoundError) as exc:
                 # Don't abort the whole pipeline if a single clip fails —
