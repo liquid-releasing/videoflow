@@ -477,10 +477,14 @@ def analyze_beats(
                             raise BeatError(f"FFmpeg audio extraction failed (exit {_rc})")
                     except FileNotFoundError:
                         Path(_staging).unlink(missing_ok=True)
+                        # Names no host app: videoflow is the shared engine, and
+                        # the lookup below already searches next to this module
+                        # and next to the input. Naming one consumer sent users
+                        # of the others hunting for a folder they don't have.
                         raise BeatError(
                             "FFmpeg is required to extract audio from video files. "
                             "Install it from https://ffmpeg.org/download.html — "
-                            "or place ffmpeg.exe in the forgegen folder."
+                            "or place ffmpeg.exe next to the video file."
                         )
                     load_path = audio_cache.publish(
                         _staging, input, sr, damaged_after_ms=_damaged_after_ms,
