@@ -27,7 +27,19 @@ def _media(td: str, name: str = "track.mp4") -> Path:
 
 
 def _chapters(td: str) -> Path:
-    return Path(td) / "track.chapters.json"
+    """Where the chapters sidecar for `_media(td)` actually lives.
+
+    Sidecars moved into the project's hidden `.forge` folder rather than
+    scattering next to the media. This helper hardcoded the old flat path,
+    so every test that wrote or read through it broke on a change the module
+    documents as deliberate. Ask sidecar_path_for instead of reconstructing
+    the path, so the tests track the real rule rather than a frozen copy.
+    """
+    path = sidecar_path_for(Path(td) / "track.mp4")
+    # Tests use this as a WRITE target as often as a read one, and the forge
+    # dir does not exist until something creates it.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -605,7 +617,7 @@ class TestTypedView(unittest.TestCase):
     def test_chapters_from_sidecar_returns_chapter_records(self):
         doc = {
             "chapters": [
-                {"at_ms": 0, "name": "intro", "content_type": "music",
+                {"at_ms": 0, "name": "intro", "content_type": "varied",
                  "confidence": 0.8, "evidence": ["mfcc"]},
             ],
         }
@@ -613,7 +625,25 @@ class TestTypedView(unittest.TestCase):
         self.assertEqual(len(chapters), 1)
         self.assertIsInstance(chapters[0], Chapter)
         self.assertEqual(chapters[0].name, "intro")
-        self.assertEqual(chapters[0].content_type, "music")
+        self.assertEqual(chapters[0].content_type, "varied")
+
+    def test_legacy_content_type_is_migrated_on_read(self):
+        """Old sidecars render under the CURRENT vocabulary.
+
+        content_type was renamed to texture labels, and Chapter.from_dict
+        maps the old names on read so a pre-rename chapters.json does not
+        have to be rewritten. The previous version of the test above passed
+        "music" in and asserted "music" came back out, which asserted the
+        absence of a migration the module deliberately performs.
+        """
+        for legacy, current in (("music", "driving"),
+                                ("ambient", "calm"),
+                                ("mixed", "varied")):
+            with self.subTest(legacy=legacy):
+                chapters = chapters_from_sidecar(
+                    {"chapters": [{"at_ms": 0, "content_type": legacy}]},
+                )
+                self.assertEqual(chapters[0].content_type, current)
 
 
 if __name__ == "__main__":

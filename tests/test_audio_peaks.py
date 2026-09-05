@@ -126,7 +126,12 @@ class TestSidecarIO(unittest.TestCase):
     def test_load_returns_none_on_corrupt_json(self):
         with TemporaryDirectory() as tmp:
             media = Path(tmp) / "broken.mp4"
-            Path(sidecar_path(media)).write_text("{not json")
+            # sidecar_path now points inside the project's .forge folder,
+            # which nothing has created yet -- the corrupt file still has to
+            # be written somewhere real for load_sidecar to reject it.
+            corrupt = Path(sidecar_path(media))
+            corrupt.parent.mkdir(parents=True, exist_ok=True)
+            corrupt.write_text("{not json")
             self.assertIsNone(load_sidecar(media))
 
     def test_compact_json_no_pretty_print(self):

@@ -23,6 +23,21 @@ from videoflow.chapters import (
 )
 
 
+def _sidecar(td) -> Path:
+    """Where track.mp4's chapters sidecar actually lives.
+
+    Sidecars moved into the project's hidden `.forge` folder rather than
+    sitting next to the media. These tests constructed the old flat path
+    inline in nine places, so all of them broke on a documented, deliberate
+    change. Ask the module for the path (and make the folder, since this is
+    used as a write target) instead of freezing a copy of the rule.
+    """
+    from videoflow.sidecar import sidecar_path_for
+    path = sidecar_path_for(Path(td) / "track.mp4")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 class TestChapterDataclass(unittest.TestCase):
 
     def test_default_fields(self):
@@ -106,7 +121,7 @@ class TestSidecarReader(unittest.TestCase):
         with TemporaryDirectory() as td:
             media = Path(td) / "track.mp4"
             media.write_bytes(b"")
-            sidecar = Path(td) / "track.chapters.json"
+            sidecar = _sidecar(td)
             sidecar.write_text(json.dumps({
                 "version": "1.0",
                 "chapters": [
@@ -123,7 +138,7 @@ class TestSidecarReader(unittest.TestCase):
         with TemporaryDirectory() as td:
             media = Path(td) / "track.mp4"
             media.write_bytes(b"")
-            sidecar = Path(td) / "track.chapters.json"
+            sidecar = _sidecar(td)
             sidecar.write_text(json.dumps([
                 {"at_ms": 0, "intent": "intro"},
             ]))
@@ -134,7 +149,7 @@ class TestSidecarReader(unittest.TestCase):
         with TemporaryDirectory() as td:
             media = Path(td) / "track.mp4"
             media.write_bytes(b"")
-            (Path(td) / "track.chapters.json").write_text("not json")
+            _sidecar(td).write_text("not json")
             with self.assertRaises(ChapterError):
                 read_sidecar_chapters(media)
 
@@ -142,7 +157,7 @@ class TestSidecarReader(unittest.TestCase):
         with TemporaryDirectory() as td:
             media = Path(td) / "track.mp4"
             media.write_bytes(b"")
-            (Path(td) / "track.chapters.json").write_text(
+            _sidecar(td).write_text(
                 json.dumps({"chapters": "nope"})
             )
             with self.assertRaises(ChapterError):
@@ -310,7 +325,7 @@ class TestLoadChaptersResolver(unittest.TestCase):
             media = Path(td) / "track.mp4"
             media.write_bytes(b"")
             # sidecar says "from sidecar" — should win
-            (Path(td) / "track.chapters.json").write_text(json.dumps([
+            _sidecar(td).write_text(json.dumps([
                 {"at_ms": 0, "intent": "from_sidecar"},
             ]))
 
@@ -363,7 +378,7 @@ class TestLoadChaptersResolver(unittest.TestCase):
         with TemporaryDirectory() as td:
             media = Path(td) / "track.mp3"  # not video → mp4 reader skips
             media.write_bytes(b"")
-            (Path(td) / "track.chapters.json").write_text(json.dumps([
+            _sidecar(td).write_text(json.dumps([
                 {"at_ms": 0, "intent": "from_sidecar"},
             ]))
             chapters = load_chapters(media)
@@ -387,7 +402,7 @@ class TestLoadChaptersResolver(unittest.TestCase):
         with TemporaryDirectory() as td:
             media = Path(td) / "track.mp3"
             media.write_bytes(b"")
-            (Path(td) / "track.chapters.json").write_text(json.dumps([
+            _sidecar(td).write_text(json.dumps([
                 {"at_ms": 0, "intent": "from_sidecar"},
             ]))
             (Path(td) / "track.analysis.json").write_text(json.dumps({
@@ -447,7 +462,7 @@ class TestWriteChaptersSidecar(unittest.TestCase):
                 writer="videoflow.cli",
                 writer_version="0.0.7-test",
             )
-            doc = json.loads((Path(td) / "track.chapters.json").read_text())
+            doc = json.loads(_sidecar(td).read_text())
             prov = doc.get("provenance") or []
             self.assertTrue(any(p.get("writer") == "videoflow.cli" for p in prov))
 
