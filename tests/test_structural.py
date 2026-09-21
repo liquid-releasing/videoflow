@@ -269,7 +269,7 @@ class TestAutoChapterAudioSidecars(unittest.TestCase):
             self.assertEqual(peaks_data["peak_count"], len(peaks_data["peaks"]))
 
             spec_data = json.loads(spec_path.read_text())
-            self.assertEqual(spec_data["version"], "1.1")
+            self.assertEqual(spec_data["version"], "1.2")
             self.assertGreater(spec_data["n_frames"], 0)
             self.assertEqual(spec_data["n_mels"], 64)
             self.assertIsInstance(spec_data["cells_b64"], str)

@@ -136,14 +136,50 @@ class TestSpectrogramHopIsExact(unittest.TestCase):
     """The spectrogram's hop comes from librosa's hop_length, so the fix is
     to stop rounding it to a whole millisecond rather than to re-frame."""
 
-    def test_hop_ms_is_the_exact_frame_spacing(self):
-        from videoflow.audio_spectrogram import DEFAULT_HOP_LENGTH
+    def test_hop_us_carries_the_exact_frame_spacing(self):
+        """512 samples at 22050 Hz is 23.21995ms. The exact value ships as
+        integer MICROseconds rather than as a float millisecond, because
+        hop_ms is a published contract -- see the JSON-type test below."""
+        import numpy as np
+
+        from videoflow.audio_spectrogram import (
+            DEFAULT_HOP_LENGTH, compute_sidecar_from_samples,
+        )
 
         sr = 22050
-        exact = DEFAULT_HOP_LENGTH * 1000.0 / sr
-        self.assertAlmostEqual(exact, 23.219954, places=5)
-        # The stored value must be this, not int(round(...)) == 23.
-        self.assertNotEqual(round(exact), exact)
+        data = compute_sidecar_from_samples(_tone(30, sr), sr=sr)
+        self.assertEqual(data["hop_us"], round(DEFAULT_HOP_LENGTH * 1e6 / sr))
+        self.assertEqual(data["hop_us"], 23220)
+
+    def test_hop_ms_stays_an_integer_because_a_typed_consumer_reads_it(self):
+        """THE second regression, caused by the fix for the first. Storing
+        hop_ms as a float broke the Tauri layer, which deserialises it as u32
+        -- serde failed on the WHOLE struct, so the spectrogram loaded as
+        'unavailable' instead of slightly wrong. A rounding bug is not a
+        licence to change a field's JSON type."""
+        import json
+
+        import numpy as np
+
+        from videoflow.audio_spectrogram import compute_sidecar_from_samples
+
+        data = compute_sidecar_from_samples(_tone(30, 22050), sr=22050)
+        self.assertIsInstance(data["hop_ms"], int)
+        self.assertIsInstance(data["hop_us"], int)
+        self.assertNotIsInstance(data["hop_ms"], float)
+        # And the document as a whole has to survive a strict round-trip.
+        reparsed = json.loads(json.dumps(data))
+        self.assertIsInstance(reparsed["hop_ms"], int)
+
+    def test_duration_comes_from_the_exact_hop_not_the_rounded_one(self):
+        from videoflow.audio_spectrogram import compute_sidecar_from_samples
+
+        data = compute_sidecar_from_samples(_tone(600, 22050), sr=22050)
+        self.assertAlmostEqual(data["duration_ms"] / 1000.0, 600, delta=0.05)
+        # What the rounded hop would have produced, kept as the thing we
+        # moved away from: 600s of audio reported as ~594.3s.
+        rounded = data["n_frames"] * 23 / 1000.0
+        self.assertLess(rounded, 599.0)
 
     def test_an_hour_of_frames_lands_within_a_frame_of_the_truth(self):
         """155_593 frames of a real 60:12 scene reported 3578.64s against a
@@ -151,22 +187,22 @@ class TestSpectrogramHopIsExact(unittest.TestCase):
         from videoflow.audio_spectrogram import DEFAULT_HOP_LENGTH
 
         sr = 22050
-        hop_ms = DEFAULT_HOP_LENGTH * 1000.0 / sr
+        hop_us = DEFAULT_HOP_LENGTH * 1e6 / sr
         n_frames = 155_593
-        duration_s = n_frames * hop_ms / 1000.0
+        duration_s = n_frames * hop_us / 1e6
 
         self.assertAlmostEqual(duration_s, 3612.85, delta=0.5)
         # What the rounded hop produced, kept as the thing we moved away from.
         self.assertAlmostEqual(n_frames * 23 / 1000.0, 3578.64, delta=0.5)
 
-    def test_the_sidecar_stores_a_float_hop(self):
-        import inspect
+    def test_the_exact_hop_actually_reaches_the_sidecar(self):
+        from videoflow.audio_spectrogram import compute_sidecar_from_samples
 
-        from videoflow import audio_spectrogram
-
-        src = inspect.getsource(audio_spectrogram.compute_sidecar_from_samples)
-        self.assertIn("hop_length * 1000.0 / sr", src)
-        self.assertNotIn("int(round(hop_length * 1000.0 / sr))", src)
+        data = compute_sidecar_from_samples(_tone(30, 22050), sr=22050)
+        # The rounded and exact values must BOTH be present and differ --
+        # that difference is the whole bug.
+        self.assertEqual(data["hop_ms"], 23)
+        self.assertNotEqual(data["hop_us"], data["hop_ms"] * 1000)
 
     def test_version_moved_so_drifted_caches_are_not_trusted(self):
         from videoflow.audio_spectrogram import SIDECAR_VERSION
@@ -186,9 +222,9 @@ class TestTheTwoSidecarsAgreeWithEachOther(unittest.TestCase):
         peaks = compute_sidecar_from_samples(_tone(HOUR_S, sr), sr=sr, hop_ms=10)
         peaks_s = peaks["duration_ms"] / 1000.0
 
-        spectro_hop_ms = DEFAULT_HOP_LENGTH * 1000.0 / sr
+        spectro_hop_us = DEFAULT_HOP_LENGTH * 1e6 / sr
         n_frames = int(HOUR_S * sr / DEFAULT_HOP_LENGTH)
-        spectro_s = n_frames * spectro_hop_ms / 1000.0
+        spectro_s = n_frames * spectro_hop_us / 1e6
 
         self.assertAlmostEqual(peaks_s, spectro_s, delta=0.05)
         self.assertAlmostEqual(peaks_s, HOUR_S, delta=0.05)

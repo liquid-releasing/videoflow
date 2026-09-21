@@ -71,13 +71,17 @@ class TestComputeSidecar(unittest.TestCase):
         self.assertEqual(data["db_floor"], DEFAULT_DB_FLOOR)
         self.assertEqual(data["db_ceiling"], DEFAULT_DB_CEILING)
         self.assertGreater(data["n_frames"], 0)
-        # hop_ms is the EXACT frame spacing: 512 / 22050 * 1000 = 23.21995ms.
-        # It used to be stored as int(round(...)) == 23, which compressed the
-        # timeline by 0.948% — 34s over an hour. See test_sidecar_hop_drift.
-        self.assertAlmostEqual(data["hop_ms"], 512 * 1000.0 / 22050, places=6)
-        self.assertNotEqual(data["hop_ms"], 23)
+        # hop_ms is the ROUNDED frame spacing and stays an int -- the Tauri
+        # layer reads it as u32. The EXACT spacing rides alongside it as
+        # integer microseconds, and duration_ms is computed from that, so it
+        # no longer compresses by 0.948% (34s over an hour).
+        # See tests/test_sidecar_hop_drift.py.
+        self.assertEqual(data["hop_ms"], 23)
+        self.assertIsInstance(data["hop_ms"], int)
+        self.assertEqual(data["hop_us"], 23220)
         self.assertEqual(
-            data["duration_ms"], round(data["n_frames"] * data["hop_ms"]))
+            data["duration_ms"],
+            round(data["n_frames"] * data["hop_us"] / 1000.0))
 
     def test_cells_b64_size_matches_n_frames_x_n_mels(self):
         y = np.full(22050, 0.5, dtype=np.float32)
@@ -183,8 +187,9 @@ class TestConstants(unittest.TestCase):
 
     def test_defaults_present_and_sensible(self):
         self.assertEqual(SIDECAR_SUFFIX, ".spectrogram.json")
-        # 1.1 = exact float hop_ms. 1.0 sidecars carry a -0.948% compression.
-        self.assertEqual(SIDECAR_VERSION, "1.1")
+        # 1.2 adds the exact `hop_us`. 1.0 carries a -0.948% compression;
+        # 1.1 stored a float hop_ms that the Tauri layer could not parse.
+        self.assertEqual(SIDECAR_VERSION, "1.2")
         self.assertEqual(DEFAULT_N_MELS, 64)
         self.assertEqual(DEFAULT_HOP_LENGTH, 512)
         self.assertEqual(DEFAULT_FMAX, 8000)

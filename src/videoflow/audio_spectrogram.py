@@ -15,10 +15,12 @@ the sidecar shape documented below.
 Sidecar shape (``<stem>.spectrogram.json``):
     {
       "version": "1.0",
-      "hop_ms": float,          # frame hop in ms, EXACT (hop_length * 1000 / sr)
+      "hop_ms": int,            # frame hop in ms, ROUNDED - display only
+      "hop_us": int,            # frame hop in MICROseconds, exact - use this
+                                # to map a frame index to a time
       "n_mels": int,            # number of mel frequency bins
       "n_frames": int,          # number of time frames in the spectrogram
-      "duration_ms": int,       # round(n_frames * hop_ms)
+      "duration_ms": int,       # from hop_us, so it matches the real audio
       "fmax": int,              # max mel frequency in Hz
       "db_floor": float,        # cells=0 maps to this dB
       "db_ceiling": float,      # cells=255 maps to this dB (typically 0)
@@ -53,9 +55,12 @@ from typing import Any
 
 
 SIDECAR_SUFFIX = ".spectrogram.json"
-# hop_ms is an exact float from 1.1 — a 1.0 sidecar
-# carries the -0.948% compression and must be recomputed, not trusted.
-SIDECAR_VERSION = "1.1"
+# 1.2 adds `hop_us`, the exact frame spacing in microseconds.
+# 1.0 carries a -0.948% compression (hop_ms rounded, then multiplied by
+# the frame index). 1.1 briefly stored hop_ms as a FLOAT, which the Tauri
+# layer deserialises as u32 -- serde failed on the whole struct and the
+# spectrogram read as unavailable. Both are recomputed, not trusted.
+SIDECAR_VERSION = "1.2"
 
 # dB floor for the quantization mapping. librosa's power_to_db(ref=np.max)
 # returns 0 dB at the loudest cell and trends negative for quieter cells.
@@ -210,14 +215,28 @@ def compute_sidecar_from_samples(
     # Math.floor(ms / hopMs) and size with n_frames * hopMs, both already
     # double arithmetic. Anything that wants a tidy number for display
     # should round at the point of display, not here.
-    hop_ms = hop_length * 1000.0 / sr
-    duration_ms = int(round(n_frames * hop_ms))
+    # `hop_ms` stays an INTEGER, because it is part of a published contract:
+    # the Tauri layer deserialises it as u32, and a float made serde fail on
+    # the whole struct, so the spectrogram loaded as "unavailable" rather than
+    # slightly wrong. Changing a field's JSON type to fix a rounding bug just
+    # moved the breakage somewhere with a stricter parser (2026-09-21).
+    #
+    # The exact spacing ships ALONGSIDE it as integer microseconds. 512
+    # samples at 22050 Hz is 23219.95us; calling it 23ms and multiplying by
+    # the frame index compressed the timeline by 23/23.21995 = -0.948%, which
+    # is -34.3s over an hour. Consumers that map frames to time should use
+    # `hop_us`; `hop_ms` is for display and for older readers.
+    hop_us_exact = hop_length * 1_000_000.0 / sr
+    hop_ms = int(round(hop_length * 1000.0 / sr))
+    hop_us = int(round(hop_us_exact))
+    duration_ms = int(round(n_frames * hop_us_exact / 1000.0))
 
     cells_b64 = base64.b64encode(time_major.tobytes()).decode("ascii")
 
     return {
         "version": SIDECAR_VERSION,
-        "hop_ms": float(hop_ms),
+        "hop_ms": int(hop_ms),
+        "hop_us": int(hop_us),
         "n_mels": int(n_mels_out),
         "n_frames": int(n_frames),
         "duration_ms": duration_ms,
