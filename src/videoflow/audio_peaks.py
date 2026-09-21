@@ -43,7 +43,9 @@ from typing import Any
 
 
 SIDECAR_SUFFIX = ".audio.json"
-SIDECAR_VERSION = "1.0"
+# hop boundaries are exact from 1.1 — a 1.0 sidecar
+# carries the +0.227% stretch and must be recomputed, not trusted.
+SIDECAR_VERSION = "1.1"
 
 # Default hop. 10ms ≈ 100 peaks/sec → 30min track ≈ 180000 peaks ≈ 4MB
 # JSON. Fine enough to read individual beats once the canvas renderer
@@ -115,15 +117,32 @@ def compute_sidecar_from_samples(
         warnings.warn("audio-peaks: no samples to analyze")
         return None
 
-    hop_samples = max(1, int(round(sr * hop_ms / 1000.0)))
-    n_hops = len(samples) // hop_samples
+    # Hop boundaries come from the EXACT fractional hop length, not a
+    # rounded one. At the default 22050 Hz a 10ms hop is 220.5 samples;
+    # rounding that to 220 and still calling each hop "10ms" stretched the
+    # whole timeline by 220.5/220 = +0.227%. On an hour of audio that is
+    # +8.2s, so the waveform under the playhead drifted steadily further
+    # ahead of the picture — measured on a real 60:12 scene whose sidecar
+    # claimed 3621.05s (2026-09-21).
+    #
+    # Alternating 220/221-sample frames average exactly 220.5, so peaks[i]
+    # really does cover [i*hop_ms, (i+1)*hop_ms) and duration_ms is true.
+    hop_exact = sr * hop_ms / 1000.0
+    if hop_exact < 1.0:
+        hop_exact = 1.0  # sub-sample hop: one sample per hop is the floor
+    n_hops = int(len(samples) / hop_exact)
     if n_hops == 0:
         warnings.warn(f"audio-peaks: audio too short for hop_ms={hop_ms}")
         return None
-    trimmed = samples[: n_hops * hop_samples].astype(np.float32, copy=False)
-    frames = trimmed.reshape(n_hops, hop_samples)
+    edges = np.rint(np.arange(n_hops + 1) * hop_exact).astype(np.int64)
+    trimmed = samples[: int(edges[-1])].astype(np.float32, copy=False)
 
-    rms = np.sqrt(np.mean(frames * frames, axis=1))
+    # reduceat rather than reshape: frames are no longer a constant width.
+    # It also avoids materialising an (n_hops, hop) view of a multi-GB track.
+    squared = trimmed * trimmed
+    sums = np.add.reduceat(squared, edges[:-1])
+    counts = np.diff(edges).astype(np.float32)
+    rms = np.sqrt(sums / counts)
     peak_max = float(np.max(rms))
     if peak_max > 0:
         norm = (rms / peak_max).astype(np.float32, copy=False)

@@ -264,12 +264,12 @@ class TestAutoChapterAudioSidecars(unittest.TestCase):
             # so any future change to the sidecar format gets caught here
             # rather than only at the JS consumer.
             peaks_data = json.loads(peaks_path.read_text())
-            self.assertEqual(peaks_data["version"], "1.0")
+            self.assertEqual(peaks_data["version"], "1.1")
             self.assertGreater(peaks_data["peak_count"], 0)
             self.assertEqual(peaks_data["peak_count"], len(peaks_data["peaks"]))
 
             spec_data = json.loads(spec_path.read_text())
-            self.assertEqual(spec_data["version"], "1.0")
+            self.assertEqual(spec_data["version"], "1.1")
             self.assertGreater(spec_data["n_frames"], 0)
             self.assertEqual(spec_data["n_mels"], 64)
             self.assertIsInstance(spec_data["cells_b64"], str)

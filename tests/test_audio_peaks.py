@@ -191,7 +191,10 @@ class TestConstants(unittest.TestCase):
 
     def test_defaults_present_and_sensible(self):
         self.assertEqual(SIDECAR_SUFFIX, ".audio.json")
-        self.assertEqual(SIDECAR_VERSION, "1.0")
+        # 1.1 = exact fractional hop boundaries. 1.0 sidecars carry a
+        # +0.227% time-stretch and are recomputed rather than trusted; see
+        # tests/test_sidecar_hop_drift.py.
+        self.assertEqual(SIDECAR_VERSION, "1.1")
         self.assertEqual(DEFAULT_HOP_MS, 10)
         self.assertEqual(DEFAULT_SAMPLE_RATE, 22050)
 

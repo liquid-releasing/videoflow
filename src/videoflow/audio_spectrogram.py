@@ -15,10 +15,10 @@ the sidecar shape documented below.
 Sidecar shape (``<stem>.spectrogram.json``):
     {
       "version": "1.0",
-      "hop_ms": int,            # frame hop in ms (derived from sr / hop_length)
+      "hop_ms": float,          # frame hop in ms, EXACT (hop_length * 1000 / sr)
       "n_mels": int,            # number of mel frequency bins
       "n_frames": int,          # number of time frames in the spectrogram
-      "duration_ms": int,       # n_frames * hop_ms
+      "duration_ms": int,       # round(n_frames * hop_ms)
       "fmax": int,              # max mel frequency in Hz
       "db_floor": float,        # cells=0 maps to this dB
       "db_ceiling": float,      # cells=255 maps to this dB (typically 0)
@@ -53,7 +53,9 @@ from typing import Any
 
 
 SIDECAR_SUFFIX = ".spectrogram.json"
-SIDECAR_VERSION = "1.0"
+# hop_ms is an exact float from 1.1 — a 1.0 sidecar
+# carries the -0.948% compression and must be recomputed, not trusted.
+SIDECAR_VERSION = "1.1"
 
 # dB floor for the quantization mapping. librosa's power_to_db(ref=np.max)
 # returns 0 dB at the loudest cell and trends negative for quieter cells.
@@ -196,14 +198,26 @@ def compute_sidecar_from_samples(
     time_major = quantized.T.copy(order="C")  # (n_frames, n_mels), contiguous
     n_frames, n_mels_out = time_major.shape
 
-    hop_ms = int(round(hop_length * 1000.0 / sr))
-    duration_ms = int(n_frames * hop_ms)
+    # EXACT hop, not a rounded one. 512 samples at 22050 Hz is 23.21995ms;
+    # storing 23 and computing every frame time as frame * 23 compressed the
+    # timeline by 23/23.21995 = -0.948%. On an hour that is -34.3s, so the
+    # spectrogram ran steadily further BEHIND the picture — and since the
+    # waveform sidecar drifted the other way (+8.2s, see audio_peaks), the
+    # two views of the same audio disagreed with each other by ~42s at the
+    # end of a 60-minute scene. Measured on a real one (2026-09-21).
+    #
+    # A float is safe for every consumer: the JS renderers index with
+    # Math.floor(ms / hopMs) and size with n_frames * hopMs, both already
+    # double arithmetic. Anything that wants a tidy number for display
+    # should round at the point of display, not here.
+    hop_ms = hop_length * 1000.0 / sr
+    duration_ms = int(round(n_frames * hop_ms))
 
     cells_b64 = base64.b64encode(time_major.tobytes()).decode("ascii")
 
     return {
         "version": SIDECAR_VERSION,
-        "hop_ms": hop_ms,
+        "hop_ms": float(hop_ms),
         "n_mels": int(n_mels_out),
         "n_frames": int(n_frames),
         "duration_ms": duration_ms,
