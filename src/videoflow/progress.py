@@ -44,6 +44,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator, Literal
+from .atomic_write import write_json_atomic
 
 ProgressEventKind = Literal["start", "progress", "complete"]
 
@@ -144,8 +145,7 @@ class ETAEstimator:
         """Persist current timings to disk. Failures are swallowed —
         timing telemetry never breaks an analysis."""
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps(self._timings, indent=2))
+            write_json_atomic(self.path, self._timings, indent=2)
         except OSError:
             pass
 

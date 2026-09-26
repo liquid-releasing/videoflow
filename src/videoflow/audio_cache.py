@@ -47,6 +47,7 @@ import tempfile
 from pathlib import Path
 
 from videoflow.tempfiles import audio_temp_dir
+from .atomic_write import write_json_atomic
 
 # Bump when the extraction's *output* format changes (sample format, channel
 # layout, filters applied during extraction) so stale WAVs from an older
@@ -164,14 +165,14 @@ def publish(
         return str(staging)
 
     try:
-        _meta_path(wav).write_text(
-            json.dumps({
+        write_json_atomic(
+            _meta_path(wav),
+            {
                 "damaged_after_ms": damaged_after_ms,
                 "sr": int(sr),
                 "cache_version": CACHE_VERSION,
                 "source": str(Path(media_path)),
-            }),
-            encoding="utf-8",
+            },
         )
     except OSError:
         pass  # the WAV is what matters; meta is best-effort

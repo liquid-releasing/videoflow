@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Callable
 
 from videoflow.audio import AudioBeatMap
+from .atomic_write import write_json_atomic
 
 
 class GenerateError(RuntimeError):
@@ -781,8 +782,7 @@ def export_funscript(
     if metadata:
         data["metadata"] = metadata
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    write_json_atomic(output, data, indent=2)
     return output
 
 

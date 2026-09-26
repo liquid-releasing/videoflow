@@ -44,6 +44,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from pathlib import Path
+from .atomic_write import write_json_atomic
 
 
 class EventError(RuntimeError):
@@ -220,5 +221,7 @@ def write_events(
     metadata = doc.setdefault("metadata", {})
     metadata["events"] = events_to_dicts(sorted_events)
 
-    path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    # Atomic: this rewrites the user's own funscript in place, so a kill or
+    # a crash mid-write would destroy it rather than merely corrupt a cache.
+    write_json_atomic(path, doc, indent=2)
     return path

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from videoflow.descreech import descreech
 from videoflow.progress import OnProgress, ProgressReporter
+from .atomic_write import write_json_atomic
 
 _nullcontext = contextlib.nullcontext
 
@@ -121,8 +122,7 @@ class AudioBeatMap:
             Path to the written file.
         """
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.to_dict(), indent=2))
+        write_json_atomic(path, self.to_dict(), indent=2)
         return path
 
     @classmethod

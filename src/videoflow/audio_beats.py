@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from .atomic_write import write_json_atomic
 
 
 SIDECAR_SUFFIX = ".beats.json"
@@ -66,9 +67,7 @@ def load_sidecar(media_path: str | Path) -> dict[str, Any] | None:
 def write_sidecar(media_path: str | Path, data: dict[str, Any]) -> str:
     """Write *data* to ``<stem>.beats.json`` next to the media file."""
     sp = sidecar_path(media_path)
-    Path(sp).parent.mkdir(parents=True, exist_ok=True)
-    with open(sp, "w") as f:
-        json.dump(data, f, separators=(",", ":"))
+    write_json_atomic(sp, data, separators=(",", ":"))
     return sp
 
 

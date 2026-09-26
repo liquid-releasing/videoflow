@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from videoflow.chapters import Chapter
+from .atomic_write import write_json_atomic
 
 CURRENT_SCHEMA_VERSION = "3.0"
 SCHEMA_NAME = "audio-structure"
@@ -255,10 +256,7 @@ def write_sidecar(
     if mode == "analyze":
         merged["analyzer_version"] = ANALYZER_VERSION
 
-    target.write_text(
-        json.dumps(merged, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    write_json_atomic(target, merged, indent=2, ensure_ascii=False)
     return target
 
 

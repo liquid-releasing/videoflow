@@ -52,6 +52,7 @@ import json
 import warnings
 from pathlib import Path
 from typing import Any
+from .atomic_write import write_json_atomic
 
 
 SIDECAR_SUFFIX = ".spectrogram.json"
@@ -116,9 +117,7 @@ def write_sidecar(media_path: str | Path, data: dict[str, Any]) -> str:
     is fine without it. Returns the written sidecar path.
     """
     sp = sidecar_path(media_path)
-    Path(sp).parent.mkdir(parents=True, exist_ok=True)
-    with open(sp, "w") as f:
-        json.dump(data, f, separators=(",", ":"))
+    write_json_atomic(sp, data, separators=(",", ":"))
     return sp
 
 
